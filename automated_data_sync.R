@@ -84,8 +84,11 @@ sync_practice_data <- function() {
   practice_base_path <- "/practice/2025/"
   
   # Get all subdirectories (month folders)
+  cat("DEBUG: Attempting to list months from:", practice_base_path, "\n")
   months <- list_ftp_files(practice_base_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
+  cat("DEBUG: Found", length(months), "items in practice base path:", paste(months, collapse=", "), "\n")
   month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
+  cat("DEBUG: Filtered to", length(month_dirs), "month directories:", paste(month_dirs, collapse=", "), "\n")
   
   downloaded_count <- 0
   
@@ -94,23 +97,31 @@ sync_practice_data <- function() {
     cat("Checking practice month:", month_dir, "\n")
     
     # Get day folders in this month
+    cat("DEBUG: Listing days in month path:", month_path, "\n")
     days <- list_ftp_files(month_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
+    cat("DEBUG: Found", length(days), "items in month:", paste(days, collapse=", "), "\n")
     day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
+    cat("DEBUG: Filtered to", length(day_dirs), "day directories:", paste(day_dirs, collapse=", "), "\n")
     
     for (day_dir in day_dirs) {
       day_path <- paste0(month_path, day_dir, "/")
       cat("Processing practice date: 2025/", month_dir, "/", day_dir, "\n")
       
       # Look for CSV files directly in the day folder (no CSV subdirectory)
+      cat("DEBUG: Listing files in day path:", day_path, "\n")
       files_in_day <- list_ftp_files(day_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
+      cat("DEBUG: Found", length(files_in_day), "files in day:", paste(files_in_day, collapse=", "), "\n")
       csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+      cat("DEBUG: Found", length(csv_files), "CSV files:", paste(csv_files, collapse=", "), "\n")
       
       # Filter out files with "playerpositioning" in the name (allow unverified)
       csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
+      cat("DEBUG: After filtering, ", length(csv_files), "CSV files remain:", paste(csv_files, collapse=", "), "\n")
       
       for (file in csv_files) {
         remote_path <- paste0(day_path, file)
         local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", month_dir, "_", day_dir, "_", file))
+        cat("DEBUG: Attempting to download", remote_path, "to", local_path, "\n")
         
         if (download_csv(remote_path, local_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)) {
           downloaded_count <- downloaded_count + 1
