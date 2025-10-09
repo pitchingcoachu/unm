@@ -1,0 +1,2 @@
+PITCH_MOD_DB_PATH=~/pcu_pitch_dashboard/pitch_modifications.db
+PITCH_MOD_EXPORT_PATH=~/pcu_pitch_dashboard/pitch_type_modifications.csv
