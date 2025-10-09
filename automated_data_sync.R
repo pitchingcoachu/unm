@@ -10,10 +10,15 @@ library(dplyr)
 library(lubridate)
 library(stringr)
 
-# FTP credentials
-FTP_HOST <- "ftp.trackmanbaseball.com"
-FTP_USER <- "GrandCanyon"
-FTP_PASS <- "F42Y6LiLGS"
+# FTP credentials for practice data
+PRACTICE_FTP_HOST <- "ftp.trackmanbaseball.com"
+PRACTICE_FTP_USER <- "Jared Gaynor"
+PRACTICE_FTP_PASS <- "Wev4SdE2a8"
+
+# FTP credentials for v3 data
+V3_FTP_HOST <- "ftp.trackmanbaseball.com"
+V3_FTP_USER <- "UNewMexico"
+V3_FTP_PASS <- "nPyLmUW9gJ"
 
 # Local data directories
 LOCAL_DATA_DIR      <- "data/"
@@ -26,8 +31,8 @@ dir.create(LOCAL_PRACTICE_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(LOCAL_V3_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Function to list files in FTP directory
-list_ftp_files <- function(ftp_path) {
-  url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, ftp_path)
+list_ftp_files <- function(ftp_path, ftp_host, ftp_user, ftp_pass) {
+  url <- paste0("ftp://", ftp_user, ":", ftp_pass, "@", ftp_host, ftp_path)
   tryCatch({
     files <- getURL(url, ftp.use.epsv = FALSE, dirlistonly = TRUE)
     strsplit(files, "\n")[[1]]
@@ -38,14 +43,14 @@ list_ftp_files <- function(ftp_path) {
 }
 
 # Function to download CSV file (no filtering - app will handle filtering)
-download_csv <- function(remote_file, local_file) {
+download_csv <- function(remote_file, local_file, ftp_host, ftp_user, ftp_pass) {
   # Skip if file already exists (incremental sync)
   if (file.exists(local_file)) {
     cat("Skipping existing file:", basename(local_file), "\n")
     return(FALSE)  # Return FALSE so we don't count it as newly downloaded
   }
   
-  url <- paste0("ftp://", FTP_USER, ":", FTP_PASS, "@", FTP_HOST, remote_file)
+  url <- paste0("ftp://", ftp_user, ":", ftp_pass, "@", ftp_host, remote_file)
   
   tryCatch({
     # Download file to temporary location
@@ -79,7 +84,7 @@ sync_practice_data <- function() {
   practice_base_path <- "/practice/2025/"
   
   # Get all subdirectories (month folders)
-  months <- list_ftp_files(practice_base_path)
+  months <- list_ftp_files(practice_base_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
   month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
   
   downloaded_count <- 0
@@ -89,7 +94,7 @@ sync_practice_data <- function() {
     cat("Checking practice month:", month_dir, "\n")
     
     # Get day folders in this month
-    days <- list_ftp_files(month_path)
+    days <- list_ftp_files(month_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
     day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
     
     for (day_dir in day_dirs) {
@@ -97,7 +102,7 @@ sync_practice_data <- function() {
       cat("Processing practice date: 2025/", month_dir, "/", day_dir, "\n")
       
       # Look for CSV files directly in the day folder (no CSV subdirectory)
-      files_in_day <- list_ftp_files(day_path)
+      files_in_day <- list_ftp_files(day_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)
       csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
       
       # Filter out files with "playerpositioning" in the name (allow unverified)
@@ -107,7 +112,7 @@ sync_practice_data <- function() {
         remote_path <- paste0(day_path, file)
         local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", month_dir, "_", day_dir, "_", file))
         
-        if (download_csv(remote_path, local_path)) {
+        if (download_csv(remote_path, local_path, PRACTICE_FTP_HOST, PRACTICE_FTP_USER, PRACTICE_FTP_PASS)) {
           downloaded_count <- downloaded_count + 1
         }
         
@@ -134,7 +139,7 @@ is_date_in_range <- function(file_path) {
   file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
   
   # Start date: August 1, 2025 (nothing before this)
-  start_date <- as.Date("2025-10-03")
+  start_date <- as.Date("2025-8-03")
   
   # Include all data from August 1, 2025 onwards (no future year restrictions)
   return(file_date >= start_date)
@@ -146,7 +151,7 @@ sync_v3_data <- function() {
   v3_base_path <- "/v3/2025/"
   
   # Get all subdirectories (month folders)
-  months <- list_ftp_files(v3_base_path)
+  months <- list_ftp_files(v3_base_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)
   month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
   
   downloaded_count <- 0
@@ -156,7 +161,7 @@ sync_v3_data <- function() {
     cat("Checking month:", month_dir, "\n")
     
     # Get day folders in this month
-    days <- list_ftp_files(month_path)
+    days <- list_ftp_files(month_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)
     day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
     
     for (day_dir in day_dirs) {
@@ -171,12 +176,12 @@ sync_v3_data <- function() {
       cat("Processing date: 2025/", month_dir, "/", day_dir, "\n")
       
       # Look for CSV folder or direct CSV files
-      files_in_day <- list_ftp_files(day_path)
+      files_in_day <- list_ftp_files(day_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)
       
       # Check if there's a CSV subdirectory
       if ("CSV" %in% files_in_day) {
         csv_path <- paste0(day_path, "CSV/")
-        csv_files <- list_ftp_files(csv_path)
+        csv_files <- list_ftp_files(csv_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)
         csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
         
         # Filter out files with "playerpositioning" or "unverified" in v3 folder
@@ -186,7 +191,7 @@ sync_v3_data <- function() {
           remote_path <- paste0(csv_path, file)
           local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
           
-          if (download_csv(remote_path, local_path)) {
+          if (download_csv(remote_path, local_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)) {
             downloaded_count <- downloaded_count + 1
           }
           
@@ -204,7 +209,7 @@ sync_v3_data <- function() {
           remote_path <- paste0(day_path, file)
           local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", month_dir, "_", day_dir, "_", file))
           
-          if (download_csv(remote_path, local_path)) {
+          if (download_csv(remote_path, local_path, V3_FTP_HOST, V3_FTP_USER, V3_FTP_PASS)) {
             downloaded_count <- downloaded_count + 1
           }
           
