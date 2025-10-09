@@ -12,7 +12,7 @@ library(stringr)
 
 # FTP credentials for practice data
 PRACTICE_FTP_HOST <- "ftp.trackmanbaseball.com"
-PRACTICE_FTP_USER <- "Jared Gaynor"
+PRACTICE_FTP_USER <- "Jared%20Gaynor"
 PRACTICE_FTP_PASS <- "Wev4SdE2a8"
 
 # FTP credentials for v3 data
@@ -105,6 +105,13 @@ sync_practice_data <- function() {
     
     for (day_dir in day_dirs) {
       day_path <- paste0(month_path, day_dir, "/")
+      full_date_path <- paste0("2025/", month_dir, "/", day_dir)
+      
+      # Check if this date is in our allowed ranges (same as v3 data)
+      if (!is_date_in_range(full_date_path)) {
+        next  # Skip this date
+      }
+      
       cat("Processing practice date: 2025/", month_dir, "/", day_dir, "\n")
       
       # Look for CSV files directly in the day folder (no CSV subdirectory)
