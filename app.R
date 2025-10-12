@@ -267,6 +267,16 @@ import_modifications_from_export <- function(con, base_data) {
   existing_keys <- if (inherits(existing, "try-error")) character(0) else as.character(existing$pitch_key)
   new_rows <- mods_csv[!(mods_csv$pitch_key %in% existing_keys), , drop = FALSE]
   if (!nrow(new_rows)) return()
+  # Only persist the columns the modifications table expects; drop extras (e.g., raw pitch columns)
+  expected_cols <- c(
+    "pitcher", "date", "rel_speed", "horz_break", "induced_vert_break",
+    "original_pitch_type", "new_pitch_type", "modified_at", "pitch_key", "created_at"
+  )
+  new_rows$id <- NULL
+  for (col in expected_cols) {
+    if (!col %in% names(new_rows)) new_rows[[col]] <- NA
+  }
+  new_rows <- new_rows[, expected_cols, drop = FALSE]
   dbWriteTable(con, "modifications", new_rows, append = TRUE)
 }
 
