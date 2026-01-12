@@ -282,7 +282,7 @@ main_sync <- function() {
   last_sync_file <- file.path(LOCAL_DATA_DIR, "last_sync.txt")
   if (!file.exists(last_sync_file)) {
     cat("First run detected - cleaning old data files\n")
-    old_files <- list.files(LOCAL_DATA_DIR, pattern = "\.(csv|txt)$", full.names = TRUE, recursive = TRUE)
+    old_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.(csv|txt)$", full.names = TRUE, recursive = TRUE)
     if (length(old_files) > 0) {
       file.remove(old_files)
       cat("Cleaned", length(old_files), "old data files\n")
