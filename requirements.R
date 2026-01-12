@@ -16,6 +16,7 @@ install_if_missing <- function(packages) {
 # List of required packages
 required_packages <- c(
   "shiny",
+  "shinyjs",
   "dplyr",
   "ggplot2",
   "purrr",
@@ -35,7 +36,14 @@ required_packages <- c(
   "plotly",
   "RCurl",
   "jsonlite",
-  "digest"
+  "digest",
+  "colourpicker",
+  "memoise",
+  "shinymanager",
+  "DBI",
+  "RSQLite",
+  "RMariaDB",
+  "RPostgres"
 )
 
 
