@@ -1,0 +1,20 @@
+# CSV Exclusion List for GCU TrackMan Data Sync
+# Add filenames or patterns (one per line) that should be excluded from automatic sync
+# Lines starting with # are comments and will be ignored
+# Examples:
+#   exact_filename.csv
+#   partial_match_pattern
+#   BadData_2025-10-27
+#
+# Test exclusion for demonstration
+# Pitcher assignments were wrong during this game
+# Bad data from October 26 Private session 1
+20251026-BrazellField-Private-1_unverified.csv
+# Bad data from October 26 Private session 2
+20251026-BrazellField-Private-2_unverified.csv
+# Bad data from October 26 Private session 3
+20251026-BrazellField-Private-3_unverified.csv
+# Bad data from October 26 Private session 4
+20251026-BrazellField-Private-4_unverified.csv
+# Bad data from October 26 Private session 5
+20251026-BrazellField-Private-5_unverified.csv
