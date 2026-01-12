@@ -27,9 +27,10 @@ deploy_app <- function() {
       
       # Install required packages if not already installed
       required_packages <- c(
-        "shiny", "dplyr", "purrr", "ggplot2", "DT", "gridExtra", 
-        "patchwork", "hexbin", "ggiraph", "httr2", "MASS", 
-        "curl", "readr", "lubridate", "stringr", "akima", 
+        "shiny", "shinyjs", "dplyr", "purrr", "ggplot2", "DT", "gridExtra", 
+        "patchwork", "hexbin", "ggiraph", "httr2", "MASS", "digest",
+        "curl", "readr", "lubridate", "stringr", "akima", "colourpicker",
+        "memoise", "shinymanager", "DBI", "RSQLite",
         "plotly", "RCurl", "jsonlite"
       )
       
