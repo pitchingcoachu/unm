@@ -1,33 +1,29 @@
 # School-specific overrides for the shared app.
 # Copy this file to another repo and keep the same structure when you need to customize colors, logos, APIs, etc.
 school_config <- list(
-  team_code = "OSU",
+  team_code = "UNM",
   # Player filters
   allowed_pitchers = c(
-    "Lee, Aidan",
-    "Limas, Jacob",
-    "Higginbottom, Elijah",
-    "Cunnings, Cam",
-    "Moeller, Luke",
-    "Smith, Jace",
-    "Frey, Chase",
-    "Ahern, Garrett",
-    "McGuire, Tommy",
-    "Robb, Nicholas",
-    "Guerrero, JT",
-    "Gregory, Billy",
-    "Penzkover, Gunnar",
-    "Lewis, JT",
-    "Kiemele, Cody",
-    "Cohen, Andrew",
-    "Lyon, Andrew",
-    "Johns, Tanner",
-    "Toney, Brock",
-    "Sloan, Landon",
-    "Key, Chance",
-    "Orr, Dillon",
-    "Yates, Zach",
-    "New, Cody"
+    "White, Tommy",
+    "Alvarez, Diego",
+    "Woltz, Ethin",
+    "Cornelius, Matt",
+    "Grubbs, Talor",
+    "Romero, Matt",
+    "Jackson, Samuel",
+    "Mogen, Cristian",
+    "Corkrean, Cooper",
+    "Barnett, Logan",
+    "Lee, Seth",
+    "Cunningham, Ty",
+    "Wiseman, Luke",
+    "Barnhouse, Josh",
+    "Do, Tyler",
+    "Lehmbeck, Blake",
+    "Castillo, Ryan",
+    "Edgerton, Seth",
+    "Gergen, Jacob",
+    "Jacobson, Reid"
   ),
   allowed_hitters = c(
     "Wentworth, TP",
@@ -106,30 +102,24 @@ school_config <- list(
     "Moseman, Cody"
   ),
   colors = list(
-    primary             = "#0d1224",   # deep navy used in the dark-mode radial gradient (gcu/app.R:17666-17674)
-    accent              = "#667eea",   # start of the active-tab/btn gradient (gcu/app.R:17464-17515)
-    accent_secondary    = "#764ba2",   # end of that same gradient
-    background          = "#f5f7fa",   # light page background (gcu/app.R:17135)
-    background_secondary= "#e8ecf1"   # the matching secondary background tone
+    primary             = "#ba0c2f",   # crimson from UNM logo
+    accent              = "#ba0c2f",   # bold red gradient start
+    accent_secondary    = "#9fa0a2",   # grey accent from logo
+    background          = "#ffffff",   # clean white page base
+    background_secondary= "#f4f4f4"    # light off-white secondary tone
     
   ),
-  logo = "OSUlogo.png",
+  logo = "UNMlogo.png",
   coaches_emails = c(
-    "Blake.hawksworth@okstate.edu",
-    "Payton.stevens@okstate.edu",
-    "Trey.cobb@okstate.edu",
-    "jared.s.gaynor@gmail.com",
-    "Victor.Romero@okstate.edu",
-    "J.Holliday@okstate.edu",
-    "Mark.Ginther@okstate.edu",
-    "hub.roberts@okstate.edu"
+    "mlopez41@unm.edu",
+    "jstill@unm.edu"
   ),
   notes_api = list(
-    base_url = "https://script.google.com/macros/s/AKfycby8_RuLj5hKxi129ru32cpEojVimffD2msCSl-I9r9a1LfZe9Ht-yLPbiDHVatm48g/exec",
-    token = "OSUbaseball"
+    base_url = "https://script.google.com/macros/s/AKfycbyo6HKhHDSoUNRWtmFpto7BLqBxWU2nG5-ifkmsDTYqHq5mBFGhtdsmIGvb25xFsNh0/exec",
+    token = "unmbaseball"
   ),
   extra = list(
-    school_name = "Oklahoma State",
+    school_name = "unm",
     ftp_folder = "trackman",
     cloudinary_folder = "trackman"
   )
