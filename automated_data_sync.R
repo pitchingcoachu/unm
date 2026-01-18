@@ -14,7 +14,7 @@ source("csv_filter_utils.R")
 # FTP credentials (practice and v3 use separate accounts)
 PRACTICE_FTP <- list(
   host = "ftp.trackmanbaseball.com",
-  user = "Jared%20Gaynor",
+  user = "Jared Gaynor",
   pass = "Wev4SdE2a8"
 )
 V3_FTP <- list(
