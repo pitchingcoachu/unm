@@ -104,11 +104,19 @@ sync_practice_data <- function() {
         cat("Processing practice date:", yr, "/", month_dir, "/", day_dir, "\n")
         
         files_in_day <- list_ftp_files(day_path, PRACTICE_FTP)
-        csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+        csv_path <- day_path
+        csv_files <- files_in_day
+
+        if ("CSV" %in% files_in_day) {
+          csv_path <- paste0(day_path, "CSV/")
+          csv_files <- list_ftp_files(csv_path, PRACTICE_FTP)
+        }
+
+        csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
         csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
         
         for (file in csv_files) {
-          remote_path <- paste0(day_path, file)
+          remote_path <- paste0(csv_path, file)
           local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", yr, "_", month_dir, "_", day_dir, "_", file))
           
           if (download_csv(remote_path, local_path, PRACTICE_FTP)) {
