@@ -9,25 +9,37 @@ library(dplyr)
 # Source the app functions we need
 source("app.R", local = TRUE)
 
-# Function to check modification status
 check_modifications_status <- function() {
   cat("=== Pitch Modifications Status Check ===\n\n")
-  
-  # Check database
-  db_path <- get_modifications_db_path()
-  cat("Database path:", db_path, "\n")
-  cat("Database exists:", file.exists(db_path), "\n")
-  
-  if (file.exists(db_path)) {
+
+  backend_type <- pitch_mod_backend_type()
+  cat("Pitch modification backend:", backend_type, "\n")
+  if (identical(backend_type, "sqlite")) {
+    db_path <- get_modifications_db_path()
+    cat("Database path:", db_path, "\n")
+    cat("Database exists:", file.exists(db_path), "\n")
+  } else {
+    cfg <- pitch_mod_backend_config()
+    cat("Postgres host:", cfg$host, "database:", cfg$dbname, "\n")
+  }
+
+  con <- mod_db_connect()
+  if (inherits(con, "error") || is.null(con)) {
+    cat("Could not connect to pitch modifications store:", conditionMessage(con), "\n")
+  } else {
+    on.exit(dbDisconnect(con), add = TRUE)
     tryCatch({
-      con <- dbConnect(SQLite(), db_path)
-      on.exit(dbDisconnect(con), add = TRUE)
-      
-      mods <- dbGetQuery(con, "SELECT COUNT(*) as count FROM modifications")
+      tbl <- as.character(pitch_mod_table_clause(con))
+      ns_clause <- pitch_mod_namespace_clause(con)
+      mods <- dbGetQuery(con, sprintf("SELECT COUNT(*) as count FROM %s WHERE namespace = %s", tbl, ns_clause))
       cat("Database modifications count:", mods$count, "\n")
-      
+
       if (mods$count > 0) {
-        recent <- dbGetQuery(con, "SELECT pitcher, date, original_pitch_type, new_pitch_type, modified_at FROM modifications ORDER BY created_at DESC LIMIT 5")
+        recent <- dbGetQuery(con, sprintf(
+          "SELECT pitcher, date, original_pitch_type, new_pitch_type, modified_at
+           FROM %s WHERE namespace = %s ORDER BY created_at DESC LIMIT 5",
+          tbl, ns_clause
+        ))
         cat("\nMost recent modifications:\n")
         print(recent)
       }
@@ -78,16 +90,15 @@ check_modifications_status <- function() {
 sync_db_to_export <- function() {
   cat("=== Syncing Database to Export CSV ===\n")
   
-  db_path <- get_modifications_db_path()
-  if (!file.exists(db_path)) {
-    cat("No database found - nothing to sync\n")
+  init_modifications_db()
+  con <- mod_db_connect()
+  if (inherits(con, "error") || is.null(con)) {
+    cat("Could not connect to pitch modifications store:", conditionMessage(con), "\n")
     return(FALSE)
   }
+  on.exit(dbDisconnect(con), add = TRUE)
   
   tryCatch({
-    con <- dbConnect(SQLite(), db_path)
-    on.exit(dbDisconnect(con), add = TRUE)
-    
     write_modifications_snapshot(con)
     cat("Database synced to export CSV successfully\n")
     return(TRUE)
@@ -108,8 +119,12 @@ import_from_export <- function() {
   }
   
   tryCatch({
-    db_path <- init_modifications_db()
-    con <- dbConnect(SQLite(), db_path)
+    init_modifications_db()
+    con <- mod_db_connect()
+    if (inherits(con, "error") || is.null(con)) {
+      cat("Could not connect to pitch modifications store:", conditionMessage(con), "\n")
+      return(FALSE)
+    }
     on.exit(dbDisconnect(con), add = TRUE)
     
     import_modifications_from_export(con, NULL)
