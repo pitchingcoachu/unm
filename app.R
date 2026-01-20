@@ -841,6 +841,218 @@ get_modifications_export_path <- function() {
   file.path("data", "pitch_type_modifications_export.csv")
 }
 
+# ---- Pitch modification backend helpers ----
+parse_pitch_mod_postgres_uri <- function(uri) {
+  if (!nzchar(uri)) return(NULL)
+  cleaned <- sub("^postgres(?:ql)?://", "", uri, ignore.case = TRUE)
+  parts <- strsplit(cleaned, "@", fixed = TRUE)[[1]]
+  if (length(parts) != 2) return(NULL)
+
+  creds <- parts[1]
+  host_part <- parts[2]
+  cred_parts <- strsplit(creds, ":", fixed = TRUE)[[1]]
+  if (length(cred_parts) < 2) return(NULL)
+
+  user <- utils::URLdecode(cred_parts[1])
+  password <- utils::URLdecode(paste(cred_parts[-1], collapse = ":"))
+
+  host_segments <- strsplit(host_part, "/", fixed = TRUE)[[1]]
+  host_port <- host_segments[1]
+  db_raw <- if (length(host_segments) > 1) paste(host_segments[-1], collapse = "/") else ""
+  if (!nzchar(db_raw)) return(NULL)
+
+  db_parts <- strsplit(db_raw, "?", fixed = TRUE)[[1]]
+  dbname <- utils::URLdecode(db_parts[1])
+  query_segments <- if (length(db_parts) > 1) db_parts[-1] else character(0)
+
+  host_parts <- strsplit(host_port, ":", fixed = TRUE)[[1]]
+  host <- host_parts[1]
+  port <- if (length(host_parts) > 1) suppressWarnings(as.integer(host_parts[2])) else 5432
+  if (is.na(port) || port <= 0) port <- 5432
+
+  params <- list(sslmode = "require", channel_binding = "require")
+  if (length(query_segments)) {
+    for (segment in strsplit(paste(query_segments, collapse = "&"), "&", fixed = TRUE)[[1]]) {
+      kv <- strsplit(segment, "=", fixed = TRUE)[[1]]
+      if (!length(kv) || !nzchar(kv[1])) next
+      key <- tolower(trimws(kv[1]))
+      value <- if (length(kv) > 1) utils::URLdecode(kv[2]) else ""
+      if (key %in% names(params)) {
+        params[[key]] <- value
+      }
+    }
+  }
+
+  list(
+    host = host,
+    port = port,
+    user = user,
+    password = password,
+    dbname = dbname,
+    sslmode = params$sslmode,
+    channel_binding = params$channel_binding
+  )
+}
+
+read_pitch_mod_db_config <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  lines <- readLines(path, warn = FALSE)
+  entries <- list()
+  for (line in lines) {
+    line <- trimws(line)
+    if (!nzchar(line) || startsWith(line, "#")) next
+    colon <- regexpr(":", line, fixed = TRUE)
+    if (colon < 0) next
+    key <- tolower(trimws(substring(line, 1, colon - 1)))
+    value <- trimws(substring(line, colon + 1))
+    entries[[key]] <- value
+  }
+  entries
+}
+
+get_pitch_mod_postgres_config <- function() {
+  url <- Sys.getenv("PITCH_MOD_DB_URL", "")
+  if (nzchar(url)) {
+    parsed <- parse_pitch_mod_postgres_uri(url)
+    if (!is.null(parsed)) return(parsed)
+  }
+
+  host <- Sys.getenv("PITCH_MOD_DB_HOST", "")
+  user <- Sys.getenv("PITCH_MOD_DB_USER", "")
+  password <- Sys.getenv("PITCH_MOD_DB_PASSWORD", "")
+  dbname <- Sys.getenv("PITCH_MOD_DB_NAME", "")
+  port <- suppressWarnings(as.integer(Sys.getenv("PITCH_MOD_DB_PORT", "")))
+  sslmode <- Sys.getenv("PITCH_MOD_DB_SSLMODE", "require")
+  channel_binding <- Sys.getenv("PITCH_MOD_DB_CHANNEL_BINDING", "require")
+  if (nzchar(host) && nzchar(user) && nzchar(password) && nzchar(dbname)) {
+    if (is.na(port) || port <= 0) port <- 5432
+    return(list(
+      host = host,
+      port = port,
+      user = user,
+      password = password,
+      dbname = dbname,
+      sslmode = sslmode,
+      channel_binding = channel_binding
+    ))
+  }
+
+  config_path <- Sys.getenv("PITCH_MOD_DB_CONFIG", "auth_db_config.yml")
+  cfg <- read_pitch_mod_db_config(config_path)
+  if (is.null(cfg)) return(NULL)
+  driver <- tolower(cfg$driver %||% "")
+  if (!driver %in% c("postgres", "postgresql", "neon")) return(NULL)
+  port_val <- suppressWarnings(as.integer(cfg$port %||% "5432"))
+  if (is.na(port_val) || port_val <= 0) port_val <- 5432
+
+  list(
+    host = cfg$host %||% "",
+    port = port_val,
+    user = cfg$user %||% "",
+    password = cfg$password %||% "",
+    dbname = cfg$dbname %||% "",
+    sslmode = cfg$sslmode %||% "require",
+    channel_binding = cfg$channel_binding %||% "require"
+  )
+}
+
+pitch_mod_backend_cfg <- local({
+  config <- get_pitch_mod_postgres_config()
+  if (!is.null(config) && nzchar(config$host) && nzchar(config$dbname) &&
+      nzchar(config$user) && nzchar(config$password)) {
+    connect_fun <- function() {
+      if (!requireNamespace("RPostgres", quietly = TRUE)) {
+        stop("RPostgres is required to use the Neon pitch modifications backend.")
+      }
+      params <- list(
+        host = config$host,
+        port = config$port %||% 5432,
+        user = config$user,
+        password = config$password,
+        dbname = config$dbname,
+        sslmode = config$sslmode %||% "require"
+      )
+      if (nzchar(config$channel_binding %||% "")) {
+        params$channel_binding <- config$channel_binding
+      }
+      do.call(DBI::dbConnect, c(list(RPostgres::Postgres()), params))
+    }
+    message(sprintf("Using Neon/Postgres for pitch modifications (host=%s db=%s)", config$host, config$dbname))
+    return(list(type = "postgres", connect = connect_fun, config = config))
+  }
+  list(type = "sqlite", connect = function() DBI::dbConnect(RSQLite::SQLite(), get_modifications_db_path()))
+})
+
+pitch_mod_backend <- function() pitch_mod_backend_cfg
+pitch_mod_backend_type <- function() pitch_mod_backend_cfg$type
+pitch_mod_backend_config <- function() pitch_mod_backend_cfg$config
+
+mod_db_connect <- function() {
+  backend <- pitch_mod_backend_cfg
+  con <- tryCatch(backend$connect(), error = function(e) e)
+  if (inherits(con, "error")) return(con)
+  con
+}
+
+pitch_mod_table_name <- function() {
+  tbl <- Sys.getenv("PITCH_MOD_DB_TABLE", "modifications")
+  tbl <- gsub("[^A-Za-z0-9_]", "_", tbl, perl = TRUE)
+  if (!nzchar(tbl)) tbl <- "modifications"
+  tbl
+}
+
+pitch_mod_namespace <- function() {
+  ns <- Sys.getenv("PITCH_MOD_NAMESPACE", "")
+  if (!nzchar(ns)) {
+    ns <- basename(getwd())
+  }
+  ns <- gsub("[^A-Za-z0-9_]", "_", ns, perl = TRUE)
+  if (!nzchar(ns)) ns <- "default"
+  ns
+}
+
+pitch_mod_table_clause <- function(con) {
+  DBI::dbQuoteIdentifier(con, pitch_mod_table_name())
+}
+
+pitch_mod_namespace_clause <- function(con) {
+  DBI::dbQuoteString(con, pitch_mod_namespace())
+}
+
+pitch_mod_index_suffix <- function() {
+  paste0("modidx_", pitch_mod_table_name())
+}
+
+DELETE_PITCH_MARKER <- "__deleted_pitch__"
+
+normalize_mod_date_column <- function(vec, is_datetime = FALSE) {
+  vec <- vec %||% character(0)
+  if (length(vec) == 0) return(vec)
+  numeric_mask <- suppressWarnings(!is.na(as.numeric(vec)))
+  parsed <- rep(NA_real_, length(vec))
+  if (any(numeric_mask)) {
+    parsed[numeric_mask] <- as.numeric(vec[numeric_mask])
+    origin <- as.Date("1899-12-30")
+    parsed[numeric_mask] <- as.numeric(origin + parsed[numeric_mask])
+  }
+  if (any(!numeric_mask)) {
+    parsed[!numeric_mask] <- suppressWarnings(as.numeric(lubridate::ymd(vec[!numeric_mask], quiet = TRUE)))
+    idx <- which(is.na(parsed[!numeric_mask]))
+    if (length(idx)) {
+      parsed[!numeric_mask][idx] <- suppressWarnings(as.numeric(lubridate::mdy(vec[!numeric_mask][idx], quiet = TRUE)))
+    }
+    idx2 <- which(is.na(parsed[!numeric_mask]))
+    if (length(idx2)) {
+      parsed[!numeric_mask][idx2] <- suppressWarnings(as.numeric(lubridate::dmy(vec[!numeric_mask][idx2], quiet = TRUE)))
+    }
+  }
+  if (is_datetime) {
+    as.character(as.POSIXct(parsed, origin = "1970-01-01", tz = "UTC"))
+  } else {
+    as.character(as.Date(parsed, origin = "1970-01-01"))
+  }
+}
+
 # ---- App state (custom tables/reports/targets) persistence helpers ----
 state_backend <- function() {
   host <- Sys.getenv("MYSQL_HOST", "")
@@ -1148,8 +1360,10 @@ refresh_missing_pitch_keys <- function(con, mods_df, base_data) {
   mods_with_keys <- attach_pitch_keys_to_mods(mods_df, base_data)
   newly_filled <- which((is.na(mods_df$pitch_key) | !nzchar(mods_df$pitch_key)) & nzchar(mods_with_keys$pitch_key))
   if (length(newly_filled)) {
+    tbl <- as.character(pitch_mod_table_clause(con))
     for (idx in newly_filled) {
-      try(dbExecute(con, "UPDATE modifications SET pitch_key = ? WHERE id = ?", list(mods_with_keys$pitch_key[idx], mods_with_keys$id[idx])), silent = TRUE)
+      query <- sprintf("UPDATE %s SET pitch_key = ? WHERE id = ?", tbl)
+      try(dbExecute(con, query, list(mods_with_keys$pitch_key[idx], mods_with_keys$id[idx])), silent = TRUE)
     }
   }
   mods_with_keys
@@ -1160,9 +1374,12 @@ write_modifications_snapshot <- function(con) {
   if (!nzchar(export_path)) return()
   
   # Get all modifications from database
-  mods <- try(dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at"), silent = TRUE)
+  tbl <- as.character(pitch_mod_table_clause(con))
+  ns <- pitch_mod_namespace_clause(con)
+  mods <- try(dbGetQuery(con, sprintf("SELECT * FROM %s WHERE namespace = %s ORDER BY created_at", tbl, ns)), silent = TRUE)
   if (inherits(mods, "try-error") || !nrow(mods)) return()
-  
+  if (!"is_deleted" %in% names(mods)) mods$is_deleted <- 0
+
   # Ensure export directory exists
   dir_path <- dirname(export_path)
   if (!dir.exists(dir_path)) {
@@ -1206,7 +1423,9 @@ import_modifications_from_export <- function(con, base_data) {
   mods_csv <- attach_pitch_keys_to_mods(mods_csv, base_data)
   
   # Get existing modifications from database
-  existing <- try(dbGetQuery(con, "SELECT pitch_key FROM modifications"), silent = TRUE)
+  tbl <- as.character(pitch_mod_table_clause(con))
+  ns_clause <- pitch_mod_namespace_clause(con)
+  existing <- try(dbGetQuery(con, sprintf("SELECT pitch_key FROM %s WHERE namespace = %s", tbl, ns_clause)), silent = TRUE)
   existing_keys <- if (inherits(existing, "try-error")) character(0) else as.character(existing$pitch_key)
   
   # Find new rows (those not already in database)
@@ -1220,12 +1439,33 @@ import_modifications_from_export <- function(con, base_data) {
   expected_cols <- c(
     "pitcher", "date", "rel_speed", "horz_break", "induced_vert_break",
     "original_pitch_type", "new_pitch_type", "new_pitcher",
-    "modified_at", "pitch_key", "created_at"
+    "modified_at", "pitch_key", "created_at",
+    "namespace", "is_deleted"
   )
-  
+
   # Remove auto-increment id column if present
   new_rows$id <- NULL
-  
+
+  ns_value <- pitch_mod_namespace()
+  new_rows$namespace <- rep(ns_value, nrow(new_rows))
+  if (!"is_deleted" %in% names(new_rows)) {
+    new_rows$is_deleted <- 0L
+  }
+  new_rows$is_deleted <- as.integer(new_rows$is_deleted)
+  new_rows$is_deleted[is.na(new_rows$is_deleted)] <- 0L
+  if ("date" %in% names(new_rows)) new_rows$date <- normalize_mod_date_column(new_rows$date, is_datetime = FALSE)
+  if ("modified_at" %in% names(new_rows)) new_rows$modified_at <- normalize_mod_date_column(new_rows$modified_at, is_datetime = TRUE)
+  if (!"modified_at" %in% names(new_rows)) new_rows$modified_at <- rep(NA_character_, nrow(new_rows))
+  new_rows$modified_at <- as.character(new_rows$modified_at)
+  missing_ts <- is.na(new_rows$modified_at) |
+    !nzchar(new_rows$modified_at) |
+    new_rows$modified_at %in% c("NA", "NaN")
+  if (any(missing_ts)) {
+    fallback_ts <- as.character(Sys.time())
+    new_rows$modified_at[missing_ts] <- fallback_ts
+  }
+  if ("created_at" %in% names(new_rows)) new_rows$created_at <- normalize_mod_date_column(new_rows$created_at, is_datetime = TRUE)
+
   # Ensure all expected columns exist
   for (col in expected_cols) {
     if (!col %in% names(new_rows)) new_rows[[col]] <- NA
@@ -1236,7 +1476,7 @@ import_modifications_from_export <- function(con, base_data) {
   
   # Insert new modifications
   tryCatch({
-    dbWriteTable(con, "modifications", new_rows, append = TRUE)
+    dbWriteTable(con, pitch_mod_table_name(), new_rows, append = TRUE)
     cat("Imported", nrow(new_rows), "new modifications from export file\n")
   }, error = function(e) {
     warning("Error importing modifications: ", e$message)
@@ -1275,24 +1515,54 @@ upload_media_cloudinary <- function(path) {
 
 # Initialize modifications database
 init_modifications_db <- function() {
-  db_path <- get_modifications_db_path()
-  
-  # Wrap entire DB initialization in tryCatch to handle read-only environments
-  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) {
-    warning(sprintf("Could not connect to modifications DB (%s). Pitch edits will only persist in-memory.", conditionMessage(e)))
-    return(NULL)
-  })
-  
-  if (is.null(con) || inherits(con, "error")) {
-    return(db_path)
+  backend_type <- pitch_mod_backend_type()
+  backend_label <- if (identical(backend_type, "sqlite")) {
+    get_modifications_db_path()
+  } else {
+    cfg <- pitch_mod_backend_config()
+    if (is.null(cfg)) {
+      "postgres"
+    } else {
+      sprintf("%s/%s", cfg$host, cfg$dbname)
+    }
   }
-  
+
+  con <- mod_db_connect()
+  if (inherits(con, "error") || is.null(con)) {
+    warning(sprintf("Could not connect to pitch modifications backend (%s)", conditionMessage(con)))
+    return(invisible(NULL))
+  }
   on.exit(dbDisconnect(con), add = TRUE)
-  
-  # Execute DB operations with error handling
+
   tryCatch({
-    dbExecute(con, "
-      CREATE TABLE IF NOT EXISTS modifications (
+    tbl_clause <- as.character(pitch_mod_table_clause(con))
+    idx_suffix <- pitch_mod_index_suffix()
+    idx_lookup <- DBI::dbQuoteIdentifier(con, paste0("idx_pitch_lookup_", idx_suffix))
+    idx_key <- DBI::dbQuoteIdentifier(con, paste0("idx_pitch_key_", idx_suffix))
+    ns_value <- pitch_mod_namespace()
+    ns_default <- DBI::dbQuoteString(con, ns_value)
+
+    table_sql <- if (identical(backend_type, "postgres")) {
+      sprintf("
+      CREATE TABLE IF NOT EXISTS %s (
+        id SERIAL PRIMARY KEY,
+        pitcher TEXT NOT NULL,
+        date TEXT NOT NULL,
+        rel_speed DOUBLE PRECISION,
+        horz_break DOUBLE PRECISION,
+        induced_vert_break DOUBLE PRECISION,
+        original_pitch_type TEXT,
+        new_pitch_type TEXT NOT NULL,
+        new_pitcher TEXT,
+        modified_at TIMESTAMPTZ NOT NULL,
+        pitch_key TEXT,
+        namespace TEXT NOT NULL DEFAULT %s,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      )
+      ", tbl_clause, ns_default)
+    } else {
+      sprintf("
+      CREATE TABLE IF NOT EXISTS %s (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pitcher TEXT NOT NULL,
         date TEXT NOT NULL,
@@ -1304,30 +1574,38 @@ init_modifications_db <- function() {
         new_pitcher TEXT,
         modified_at TEXT NOT NULL,
         pitch_key TEXT,
+        namespace TEXT NOT NULL DEFAULT %s,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
-    ")
-    dbExecute(con, "
-      CREATE INDEX IF NOT EXISTS idx_pitch_lookup ON modifications 
-      (pitcher, date, rel_speed, horz_break, induced_vert_break)
-    ")
-    dbExecute(con, "
-      CREATE INDEX IF NOT EXISTS idx_pitch_key ON modifications (pitch_key)
-    ")
-    # Ensure legacy databases get the new_pitcher column
-    cols <- try(dbListFields(con, "modifications"), silent = TRUE)
-    if (!inherits(cols, "try-error") && !"new_pitcher" %in% cols) {
-      try(dbExecute(con, "ALTER TABLE modifications ADD COLUMN new_pitcher TEXT"), silent = TRUE)
+      ", tbl_clause, ns_default)
+    }
+    dbExecute(con, table_sql)
+    dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (pitcher, date, rel_speed, horz_break, induced_vert_break)", idx_lookup, tbl_clause))
+    dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS %s ON %s (pitch_key)", idx_key, tbl_clause))
+    cols <- try(dbListFields(con, pitch_mod_table_name()), silent = TRUE)
+    if (!inherits(cols, "try-error")) {
+      if (!"new_pitcher" %in% cols) {
+        try(dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN new_pitcher TEXT", tbl_clause)), silent = TRUE)
+        cols <- try(dbListFields(con, pitch_mod_table_name()), silent = TRUE)
+      }
+      if (!"namespace" %in% cols) {
+        try(dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN namespace TEXT NOT NULL DEFAULT %s", tbl_clause, ns_default)), silent = TRUE)
+      }
+      if (!"is_deleted" %in% cols) {
+        try(dbExecute(con, sprintf("ALTER TABLE %s ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0", tbl_clause)), silent = TRUE)
+      }
     }
     base_data <- get0("pitch_data_pitching", ifnotfound = NULL)
     import_modifications_from_export(con, base_data)
-    mods <- try(dbGetQuery(con, "SELECT * FROM modifications"), silent = TRUE)
+    ns_clause <- pitch_mod_namespace_clause(con)
+    mods <- try(dbGetQuery(con, sprintf("SELECT * FROM %s WHERE namespace = %s ORDER BY created_at", tbl_clause, ns_clause)), silent = TRUE)
     db_count <- if (inherits(mods, "try-error")) NA_integer_ else nrow(mods)
-    message(sprintf("Mod DB path: %s | rows: %s", db_path, db_count))
+    message(sprintf("Pitch modifications backend (%s) rows: %s", backend_label, db_count))
+
     if (!inherits(mods, "try-error") && nrow(mods)) {
       refresh_missing_pitch_keys(con, mods, base_data)
       write_modifications_snapshot(con)
-      # If the DB has fewer rows than the best available CSV, rebuild from CSV
+
       best_csv <- function() {
         candidates <- unique(c(
           get_modifications_export_path(),
@@ -1345,11 +1623,13 @@ init_modifications_db <- function() {
         }
         list(path = best, n = best_n)
       }
+
       csv_info <- best_csv()
       db_count <- nrow(mods)
       if (!is.null(csv_info$path) && is.finite(csv_info$n) && csv_info$n > db_count) {
-        message(sprintf("Rebuilding modifications DB from %s (%d -> %d rows)", csv_info$path, db_count, csv_info$n))
-        try(dbExecute(con, "DELETE FROM modifications"), silent = TRUE)
+        message(sprintf("Rebuilding modifications backend from %s (%d -> %d rows)", 
+                        csv_info$path, db_count, csv_info$n))
+        try(dbExecute(con, sprintf("DELETE FROM %s WHERE namespace = %s", tbl_clause, ns_clause)), silent = TRUE)
         mods_csv <- try(readr::read_csv(csv_info$path, show_col_types = FALSE), silent = TRUE)
         if (!inherits(mods_csv, "try-error") && nrow(mods_csv)) {
           mods_csv <- as.data.frame(mods_csv, stringsAsFactors = FALSE, check.names = FALSE)
@@ -1360,55 +1640,65 @@ init_modifications_db <- function() {
           expected_cols <- c(
             "pitcher", "date", "rel_speed", "horz_break", "induced_vert_break",
             "original_pitch_type", "new_pitch_type", "new_pitcher",
-            "modified_at", "pitch_key", "created_at"
+            "modified_at", "pitch_key", "created_at",
+            "namespace", "is_deleted"
           )
+          new_rows$namespace <- rep(ns_value, nrow(new_rows))
+          if (!"is_deleted" %in% names(new_rows)) {
+            new_rows$is_deleted <- 0L
+          }
+          new_rows$is_deleted <- as.integer(new_rows$is_deleted)
+          new_rows$is_deleted[is.na(new_rows$is_deleted)] <- 0L
           for (col in expected_cols) {
             if (!col %in% names(new_rows)) new_rows[[col]] <- NA
           }
           new_rows <- new_rows[, expected_cols, drop = FALSE]
-          try(dbWriteTable(con, "modifications", new_rows, append = TRUE), silent = TRUE)
+          if ("date" %in% names(new_rows)) new_rows$date <- normalize_mod_date_column(new_rows$date, is_datetime = FALSE)
+          if ("modified_at" %in% names(new_rows)) new_rows$modified_at <- normalize_mod_date_column(new_rows$modified_at, is_datetime = TRUE)
+          if ("created_at" %in% names(new_rows)) new_rows$created_at <- normalize_mod_date_column(new_rows$created_at, is_datetime = TRUE)
+          try(dbWriteTable(con, pitch_mod_table_name(), new_rows, append = TRUE), silent = TRUE)
         }
-        mods <- try(dbGetQuery(con, "SELECT * FROM modifications"), silent = TRUE)
+        mods <- try(dbGetQuery(con, sprintf("SELECT * FROM %s WHERE namespace = %s ORDER BY created_at", tbl_clause, ns_clause)), silent = TRUE)
         if (!inherits(mods, "try-error")) {
           refresh_missing_pitch_keys(con, mods, base_data)
           write_modifications_snapshot(con)
         }
-        # mod_memo is no longer memoized; nothing to forget
       }
     }
   }, error = function(e) {
-    warning(sprintf("Error during DB initialization: %s", conditionMessage(e)))
+    warning(sprintf("Error during pitch modifications initialization: %s", conditionMessage(e)))
   })
-  
-  db_path
+
+  invisible(backend_type)
 }
 
 # Save pitch modifications to database
-save_pitch_modifications_db <- function(selected_pitches, new_type, new_pitcher = NULL) {
-  db_path <- init_modifications_db()
-  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
-  if (inherits(con, "error")) {
-    return(list(success = FALSE, error = paste("Could not open pitch modifications database:", conditionMessage(con))))
+save_pitch_modifications_db <- function(selected_pitches, new_type, new_pitcher = NULL, delete = FALSE) {
+  init_modifications_db()
+  con <- mod_db_connect()
+  if (inherits(con, "error") || is.null(con)) {
+    return(list(success = FALSE, error = conditionMessage(con)))
   }
   on.exit(dbDisconnect(con), add = TRUE)
+
   selected_pitches <- ensure_pitch_keys(selected_pitches)
-  # Drop any aggregate/summary rows that lack a concrete pitch key
   selected_pitches <- selected_pitches[!is.na(selected_pitches$PitchKey) & nzchar(as.character(selected_pitches$PitchKey)), , drop = FALSE]
   if (!nrow(selected_pitches)) {
     return(list(success = FALSE, error = "No valid pitch rows selected (missing pitch key)."))
   }
-  # Normalize pitcher fields to avoid NULL/NA inserts
+
   pitcher_vec <- as.character(selected_pitches$Pitcher)
-  pitcher_vec[is.na(pitcher_vec) | pitcher_vec %in% c("NA","NaN","")] <- "Unknown"
+  pitcher_vec[is.na(pitcher_vec) | pitcher_vec %in% c("NA", "NaN", "")] <- "Unknown"
   if (!is.null(new_pitcher) && nzchar(new_pitcher)) {
-    # Fill any missing pitcher with the override and use override for new_pitcher column
     pitcher_vec[!nzchar(pitcher_vec) | is.na(pitcher_vec)] <- new_pitcher
     new_pitcher_vec <- rep(new_pitcher, nrow(selected_pitches))
   } else {
-    # No override provided; still ensure we don't insert blanks
     pitcher_vec[!nzchar(pitcher_vec) | is.na(pitcher_vec) | pitcher_vec %in% c("NA","NaN")] <- "Unknown"
     new_pitcher_vec <- pitcher_vec
   }
+
+  type_to_store <- if (delete) DELETE_PITCH_MARKER else new_type
+
   new_mods <- data.frame(
     pitcher = pitcher_vec,
     date = as.character(selected_pitches$Date),
@@ -1416,18 +1706,20 @@ save_pitch_modifications_db <- function(selected_pitches, new_type, new_pitcher 
     horz_break = suppressWarnings(as.numeric(selected_pitches$HorzBreak)),
     induced_vert_break = suppressWarnings(as.numeric(selected_pitches$InducedVertBreak)),
     original_pitch_type = selected_pitches$TaggedPitchType,
-    new_pitch_type = new_type,
+    new_pitch_type = type_to_store,
     new_pitcher = new_pitcher_vec,
     modified_at = as.character(Sys.time()),
     pitch_key = as.character(selected_pitches$PitchKey),
+    namespace = pitch_mod_namespace(),
+    is_deleted = as.integer(delete),
     stringsAsFactors = FALSE
   )
-  # Sanitize required NOT NULL fields
+
   new_mods$date[is.na(new_mods$date) | new_mods$date %in% c("", "NA", "NaN")] <- NA
   new_mods$pitcher[is.na(new_mods$pitcher) | new_mods$pitcher %in% c("", "NA", "NaN")] <- "Unknown"
   new_mods$new_pitcher[is.na(new_mods$new_pitcher) | new_mods$new_pitcher %in% c("", "NA", "NaN")] <- new_mods$pitcher[is.na(new_mods$new_pitcher) | new_mods$new_pitcher %in% c("", "NA", "NaN")]
   new_mods$pitch_key[is.na(new_mods$pitch_key)] <- ""
-  # Keep only rows with required fields: pitch_key, pitcher, date
+  new_mods$is_deleted[is.na(new_mods$is_deleted)] <- as.integer(delete)
   new_mods <- new_mods[
     nzchar(new_mods$pitch_key) &
       nzchar(new_mods$pitcher) &
@@ -1437,18 +1729,21 @@ save_pitch_modifications_db <- function(selected_pitches, new_type, new_pitcher 
   if (!nrow(new_mods)) {
     return(list(success = FALSE, error = "No valid pitch rows available (missing key/pitcher/date)."))
   }
+
   res <- tryCatch({
-    dbExecute(con, "BEGIN IMMEDIATE")
+    tbl_clause <- as.character(pitch_mod_table_clause(con))
+    ns_clause <- pitch_mod_namespace_clause(con)
+    dbBegin(con)
     for (i in seq_len(nrow(new_mods))) {
-      dbExecute(con, "DELETE FROM modifications WHERE pitch_key = ?", list(new_mods$pitch_key[i]))
+      key_literal <- DBI::dbQuoteString(con, new_mods$pitch_key[i])
+      delete_sql <- sprintf("DELETE FROM %s WHERE pitch_key = %s AND namespace = %s", tbl_clause, key_literal, ns_clause)
+      dbExecute(con, delete_sql)
     }
-    dbWriteTable(con, "modifications", new_mods, append = TRUE)
-    dbExecute(con, "COMMIT")
-    
-    # ENHANCED: Always update the export CSV after successful save
+    dbWriteTable(con, pitch_mod_table_name(), new_mods, append = TRUE)
+    dbCommit(con)
+
     write_modifications_snapshot(con)
-    
-    # Additional backup: create timestamped backup
+
     export_path <- get_modifications_export_path()
     if (file.exists(export_path) && nzchar(export_path)) {
       backup_dir <- file.path(dirname(export_path), "backups")
@@ -1457,22 +1752,18 @@ save_pitch_modifications_db <- function(selected_pitches, new_type, new_pitcher 
       backup_path <- file.path(backup_dir, paste0("pitch_modifications_", timestamp, ".csv"))
       try(file.copy(export_path, backup_path), silent = TRUE)
     }
-    
+
     list(success = TRUE, count = nrow(new_mods))
   }, error = function(e) {
-    try(dbExecute(con, "ROLLBACK"), silent = TRUE)
+    try(dbRollback(con), silent = TRUE)
     list(success = FALSE, error = conditionMessage(e))
   })
   res
 }
 
-# Enhanced: Load and apply modifications from database with better matching
-mod_memo <- function(db_path, mtime_sig) {
-  con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
-  if (inherits(con, "error")) return(NULL)
-  on.exit(dbDisconnect(con), add = TRUE)
-  mods <- dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at")
-  # Normalize date/time fields to avoid parsing errors
+# Enhanced: Normalize modification timestamps
+mod_memo <- function(mods_df) {
+  if (is.null(mods_df) || !nrow(mods_df)) return(mods_df)
   safe_date <- function(x) {
     tryCatch({
       v <- as.character(x)
@@ -1493,206 +1784,150 @@ mod_memo <- function(db_path, mtime_sig) {
       as.POSIXct(out, tz = "UTC")
     }, error = function(...) as.POSIXct(NA))
   }
-  mods$date <- safe_date(mods$date)
-  mods$modified_at <- safe_dt(mods$modified_at)
-  mods$created_at <- safe_dt(mods$created_at)
-  mods
+  mods_df$date <- safe_date(mods_df$date)
+  mods_df$modified_at <- safe_dt(mods_df$modified_at)
+  mods_df$created_at <- safe_dt(mods_df$created_at)
+  if (!"is_deleted" %in% names(mods_df)) mods_df$is_deleted <- 0
+  mods_df$is_deleted <- as.integer(mods_df$is_deleted)
+  mods_df
 }
 
+# Enhanced: Load and apply modifications from database with better matching
 load_pitch_modifications_db <- function(pitch_data, verbose = TRUE) {
-  # Ensure we ALWAYS return valid data, even if everything fails
   fallback_result <- list(
     data = pitch_data %>% mutate(original_row_id = row_number()),
     applied_count = 0,
     total_modifications = 0
   )
-  
-  # Wrap entire function in tryCatch to ensure we never fail to return data
+
   tryCatch({
-    db_path <- init_modifications_db()
-    
-    # Check if we're in read-only mode and need to seed DB from CSV
-    is_readonly <- tryCatch(file.access(".", 2) != 0, error = function(e) TRUE)
-    if (is_readonly) {
-      if (verbose) message("Read-only environment detected - seeding temp DB from CSV")
-      
-      # Load modifications from CSV and populate the temp database
-      csv_path <- file.path("data", "pitch_type_modifications_export.csv")
-      if (file.exists(csv_path)) {
-        tryCatch({
-          con <- dbConnect(SQLite(), db_path)
-          on.exit(dbDisconnect(con), add = TRUE)
-          
-          # Check if DB is empty (needs seeding)
-          existing_count <- tryCatch({
-            dbGetQuery(con, "SELECT COUNT(*) as n FROM modifications")$n
-          }, error = function(e) 0)
-          
-          if (existing_count == 0) {
-            # Load and import CSV modifications
-            mods_csv <- readr::read_csv(csv_path, show_col_types = FALSE)
-            if (nrow(mods_csv) > 0) {
-              mods_csv <- as.data.frame(mods_csv, stringsAsFactors = FALSE, check.names = FALSE)
-              
-              # Prepare data for insertion
-              if (!"pitch_key" %in% names(mods_csv)) mods_csv$pitch_key <- NA_character_
-              if (!"new_pitcher" %in% names(mods_csv)) mods_csv$new_pitcher <- NA_character_
-              
-              expected_cols <- c(
-                "pitcher", "date", "rel_speed", "horz_break", "induced_vert_break",
-                "original_pitch_type", "new_pitch_type", "new_pitcher",
-                "modified_at", "pitch_key", "created_at"
-              )
-              
-              for (col in expected_cols) {
-                if (!col %in% names(mods_csv)) mods_csv[[col]] <- NA
-              }
-              
-              import_data <- mods_csv[, expected_cols, drop = FALSE]
-              dbWriteTable(con, "modifications", import_data, append = TRUE)
-              
-              if (verbose) {
-                message(sprintf("Seeded temp DB with %d modifications from CSV", nrow(import_data)))
-              }
-            }
-          }
-        }, error = function(e) {
-          warning(sprintf("Could not seed DB from CSV: %s", conditionMessage(e)))
-        })
-      }
-    }
-    
-    if (!file.exists(db_path)) {
+    init_modifications_db()
+    con <- mod_db_connect()
+    if (inherits(con, "error") || is.null(con)) {
+      warning(sprintf("Could not open pitch modifications backend (%s)", conditionMessage(con)))
       return(fallback_result)
     }
-    
-    con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
-    if (inherits(con, "error")) {
-      warning(sprintf("Could not open modifications DB while loading (%s)", conditionMessage(con)))
+    on.exit(dbDisconnect(con), add = TRUE)
+
+    tbl_clause <- as.character(pitch_mod_table_clause(con))
+    ns_clause <- pitch_mod_namespace_clause(con)
+    mods <- try(dbGetQuery(con, sprintf("SELECT * FROM %s WHERE namespace = %s ORDER BY created_at", tbl_clause, ns_clause)), silent = TRUE)
+    if (inherits(mods, "error") || !nrow(mods)) {
       return(list(
         data = ensure_pitch_keys(pitch_data) %>% mutate(original_row_id = row_number()),
         applied_count = 0,
         total_modifications = 0
       ))
     }
-    on.exit(dbDisconnect(con), add = TRUE)
-    
-    tryCatch({
-      mtime_sig <- suppressWarnings(as.character(file.info(db_path)$mtime %||% Sys.time()))
-      mods <- mod_memo(db_path, mtime_sig)
-      if (is.null(mods)) {
-        return(list(
-          data = ensure_pitch_keys(pitch_data) %>% mutate(original_row_id = row_number()),
-          applied_count = 0,
-          total_modifications = 0
-        ))
-      }
-      dropped <- sum(is.na(mods$date))
-      if (dropped && verbose) message(sprintf("Dropping %d modifications with unparseable dates", dropped))
-      base_data <- ensure_pitch_keys(pitch_data)
-      mods <- refresh_missing_pitch_keys(con, mods, base_data)
-      
-      if (nrow(mods) == 0) {
-        return(list(
-          data = base_data %>% mutate(original_row_id = row_number()),
-          applied_count = 0,
-          total_modifications = 0
-        ))
-      }
-      
-      temp_data <- base_data %>% mutate(original_row_id = row_number())
-      
-      # Apply modifications with enhanced matching
-      modifications_applied <- 0
-      modifications_not_found <- 0
-      lookup_df <- get0("lookup_table", ifnotfound = NULL)
-      fetch_email <- function(name) {
-        if (is.null(lookup_df) || !"Pitcher" %in% names(lookup_df) || !"Email_lookup" %in% names(lookup_df)) {
-          return(NA_character_)
-        }
-        idx <- which(tolower(lookup_df$Pitcher) == tolower(name))
-        if (length(idx)) {
-          val <- lookup_df$Email_lookup[idx[1]]
-          if (is.na(val) || !nzchar(val)) return(NA_character_)
-          return(val)
-        }
-        NA_character_
-      }
-      
-      for (i in 1:nrow(mods)) {
-        mod <- mods[i, ]
-        
-        # Primary matching strategy: exact match on multiple fields
-        match_idx <- integer(0)
-        if ("PitchKey" %in% names(temp_data) && !is.na(mod$pitch_key) && nzchar(mod$pitch_key)) {
-          match_idx <- which(temp_data$PitchKey == mod$pitch_key)
-        }
-        if (!length(match_idx)) {
-          match_idx <- which(
-            temp_data$Pitcher == mod$pitcher &
-              temp_data$Date == mod$date &
-              abs(temp_data$RelSpeed - mod$rel_speed) < 0.1 &
-              abs(temp_data$HorzBreak - mod$horz_break) < 0.1 &
-              abs(temp_data$InducedVertBreak - mod$induced_vert_break) < 0.1
-          )
-        }
-        
-        # Fallback matching: if exact match fails, try looser criteria
-        if (length(match_idx) == 0) {
-          match_idx <- which(
-            temp_data$Pitcher == mod$pitcher &
-              temp_data$Date == mod$date &
-              abs(temp_data$RelSpeed - mod$rel_speed) < 0.5  # Slightly looser tolerance
-          )
-        }
-        
-        if (length(match_idx) > 0) {
-          # Apply modification to all matching rows (handles duplicate PitchKey entries)
-          temp_data$TaggedPitchType[match_idx] <- mod$new_pitch_type
-          if (!is.null(mod$new_pitcher) && nzchar(mod$new_pitcher)) {
-            temp_data$Pitcher[match_idx] <- mod$new_pitcher
-            new_email <- fetch_email(mod$new_pitcher)
-            if (!is.na(new_email) && "Email" %in% names(temp_data)) {
-              temp_data$Email[match_idx] <- new_email
-            }
-          }
-          modifications_applied <- modifications_applied + 1
-          
-          if (verbose) {
-            cat(sprintf("Applied: %s on %s - %s -> %s\n", 
-                        mod$pitcher, mod$date, mod$original_pitch_type, mod$new_pitch_type))
-          }
-        } else {
-          modifications_not_found <- modifications_not_found + 1
-          if (verbose) {
-            cat(sprintf("Could not find pitch to modify: %s on %s (%.1f mph)\n", 
-                        mod$pitcher, mod$date, mod$rel_speed))
-          }
-        }
-      }
-      
-      if (verbose && modifications_applied > 0) {
-        message(sprintf("Applied %d of %d stored pitch type modifications", 
-                        modifications_applied, nrow(mods)))
-        if (modifications_not_found > 0) {
-          message(sprintf("Warning: %d modifications could not be applied (pitches not found)", 
-                          modifications_not_found))
-        }
-      }
-      
+    if (!"is_deleted" %in% names(mods)) mods$is_deleted <- 0
+    mods <- mod_memo(mods)
+    dropped <- sum(is.na(mods$date))
+    if (dropped && verbose) message(sprintf("Dropping %d modifications with unparseable dates", dropped))
+
+    base_data <- ensure_pitch_keys(pitch_data)
+    mods <- refresh_missing_pitch_keys(con, mods, base_data)
+
+    if (!nrow(mods)) {
       return(list(
-        data = temp_data,
-        applied_count = modifications_applied,
-        total_modifications = nrow(mods)
+        data = base_data %>% mutate(original_row_id = row_number()),
+        applied_count = 0,
+        total_modifications = 0
       ))
-      
-    }, finally = {
-      dbDisconnect(con)
-    })
-    
+    }
+
+    temp_data <- base_data %>% mutate(original_row_id = row_number())
+    deleted_mask <- logical(nrow(temp_data))
+
+    modifications_applied <- 0
+    modifications_not_found <- 0
+    lookup_df <- get0("lookup_table", ifnotfound = NULL)
+    fetch_email <- function(name) {
+      if (is.null(lookup_df) || !"Pitcher" %in% names(lookup_df) || !"Email_lookup" %in% names(lookup_df)) {
+        return(NA_character_)
+      }
+      idx <- which(tolower(lookup_df$Pitcher) == tolower(name))
+      if (length(idx)) {
+        val <- lookup_df$Email_lookup[idx[1]]
+        if (is.na(val) || !nzchar(val)) return(NA_character_)
+        return(val)
+      }
+      NA_character_
+    }
+
+    for (i in seq_len(nrow(mods))) {
+      mod <- mods[i, ]
+      match_idx <- integer(0)
+      if ("PitchKey" %in% names(temp_data) && !is.na(mod$pitch_key) && nzchar(mod$pitch_key)) {
+        match_idx <- which(temp_data$PitchKey == mod$pitch_key)
+      }
+      if (!length(match_idx)) {
+        match_idx <- which(
+          temp_data$Pitcher == mod$pitcher &
+            temp_data$Date == mod$date &
+            abs(temp_data$RelSpeed - mod$rel_speed) < 0.1 &
+            abs(temp_data$HorzBreak - mod$horz_break) < 0.1 &
+            abs(temp_data$InducedVertBreak - mod$induced_vert_break) < 0.1
+        )
+      }
+      if (length(match_idx) == 0) {
+        match_idx <- which(
+          temp_data$Pitcher == mod$pitcher &
+            temp_data$Date == mod$date &
+            abs(temp_data$RelSpeed - mod$rel_speed) < 0.5
+        )
+      }
+      if (length(match_idx) > 0) {
+        if (isTRUE(as.integer(mod$is_deleted) == 1L)) {
+          deleted_mask[match_idx] <- TRUE
+          modifications_applied <- modifications_applied + 1
+          if (verbose) {
+            cat(sprintf("Deleted pitch: %s on %s\n", mod$pitcher, mod$date))
+          }
+          next
+        }
+        temp_data$TaggedPitchType[match_idx] <- mod$new_pitch_type
+        if (!is.null(mod$new_pitcher) && nzchar(mod$new_pitcher)) {
+          temp_data$Pitcher[match_idx] <- mod$new_pitcher
+          new_email <- fetch_email(mod$new_pitcher)
+          if (!is.na(new_email) && "Email" %in% names(temp_data)) {
+            temp_data$Email[match_idx] <- new_email
+          }
+        }
+        modifications_applied <- modifications_applied + 1
+        if (verbose) {
+          cat(sprintf("Applied: %s on %s - %s -> %s\n", 
+                      mod$pitcher, mod$date, mod$original_pitch_type, mod$new_pitch_type))
+        }
+      } else {
+        modifications_not_found <- modifications_not_found + 1
+        if (verbose) {
+          cat(sprintf("Could not find pitch to modify: %s on %s (%.1f mph)\n", 
+                      mod$pitcher, mod$date, mod$rel_speed))
+        }
+      }
+    }
+
+    if (any(deleted_mask)) {
+      temp_data <- temp_data[!deleted_mask, , drop = FALSE]
+    }
+
+    if (verbose && modifications_applied > 0) {
+      message(sprintf("Applied %d of %d stored pitch type modifications", 
+                      modifications_applied, nrow(mods)))
+      if (modifications_not_found > 0) {
+        message(sprintf("Warning: %d modifications could not be applied (pitches not found)", 
+                        modifications_not_found))
+      }
+    }
+
+    list(
+      data = temp_data,
+      applied_count = modifications_applied,
+      total_modifications = nrow(mods)
+    )
   }, error = function(e) {
     warning(sprintf("Error loading pitch modifications: %s", conditionMessage(e)))
-    return(fallback_result)
+    fallback_result
   })
 }
 
@@ -1750,38 +1985,34 @@ check_data_freshness <- function() {
 
 # Function to get modification statistics
 get_modification_stats <- function() {
-  db_path <- "pitch_modifications.db"
-  
-  if (!file.exists(db_path)) {
+  con <- mod_db_connect()
+  if (inherits(con, "error") || is.null(con)) {
     return(list(total = 0, by_player = data.frame(), recent = data.frame()))
   }
-  
-  con <- dbConnect(SQLite(), db_path)
-  
+  on.exit(dbDisconnect(con), add = TRUE)
+
   tryCatch({
-    # Get total count
-    total <- dbGetQuery(con, "SELECT COUNT(*) as count FROM modifications")$count
-    
-    # Get count by player
-    by_player <- dbGetQuery(con, "
+    tbl <- as.character(pitch_mod_table_clause(con))
+    ns_clause <- pitch_mod_namespace_clause(con)
+    total <- dbGetQuery(con, sprintf("SELECT COUNT(*) as count FROM %s WHERE namespace = %s", tbl, ns_clause))$count
+    by_player <- dbGetQuery(con, sprintf("
       SELECT pitcher, COUNT(*) as modifications 
-      FROM modifications 
+      FROM %s 
+      WHERE namespace = %s
       GROUP BY pitcher 
       ORDER BY modifications DESC
-    ")
-    
-    # Get recent modifications
-    recent <- dbGetQuery(con, "
+    ", tbl, ns_clause))
+    recent <- dbGetQuery(con, sprintf("
       SELECT pitcher, date, original_pitch_type, new_pitch_type, modified_at 
-      FROM modifications 
+      FROM %s 
+      WHERE namespace = %s
       ORDER BY created_at DESC 
       LIMIT 10
-    ")
-    
-    return(list(total = total, by_player = by_player, recent = recent))
-    
-  }, finally = {
-    dbDisconnect(con)
+    ", tbl, ns_clause))
+    list(total = total, by_player = by_player, recent = recent)
+  }, error = function(e) {
+    warning("Error querying modification stats:", e$message)
+    list(total = 0, by_player = data.frame(), recent = data.frame())
   })
 }
 
@@ -2055,18 +2286,17 @@ parse_date_flex <- function(x, pivot = 1970L) {
 }
 
 blank_ea_except_all <- function(df) {
-  if (!is.data.frame(df) || !("E+A%" %in% names(df))) return(df)
+  if (!is.data.frame(df)) return(df)
+  target_cols <- intersect(c("E+A%","Early%","Ahead%"), names(df))
+  if (!length(target_cols)) return(df)
   
-  # Look for any column that might be the grouping/pitch column - expanded list
   pitch_cols <- intersect(c("Pitch","PitchType","TaggedPitchType","SplitColumn",
                             "Batter Hand","Count","After Count","Velocity","IVB","HB",
                             "Batter","Pitcher Hand","Date","Player"), names(df))
   
-  # If the table is grouped by Player (leaderboards), keep E+A% values
   if ("Player" %in% pitch_cols) return(df)
   if (!length(pitch_cols)) return(df)
   
-  # Safe column access with error handling - check column exists first
   pitch_vals <- tryCatch({
     col_name <- pitch_cols[1]
     if (!col_name %in% names(df)) return(character(0))
@@ -2075,14 +2305,15 @@ blank_ea_except_all <- function(df) {
     return(character(nrow(df)))
   })
   
-  # If couldn't get values or wrong length, return unchanged
   if (!length(pitch_vals) || length(pitch_vals) != nrow(df)) return(df)
   
   keep_all <- is.na(pitch_vals) | pitch_vals == "all"
-  # Handle NA values in logical condition
   keep_all[is.na(keep_all)] <- FALSE
-  df$`E+A%` <- as.character(df$`E+A%`)
-  df$`E+A%`[!keep_all] <- ""
+  
+  for (col in target_cols) {
+    df[[col]] <- as.character(df[[col]])
+    df[[col]][!keep_all] <- ""
+  }
   df
 }
 
@@ -2188,6 +2419,8 @@ safe_make_summary <- function(df, group_col = "TaggedPitchType") {
       BBPercent = character(0),
       FPSPercent = character(0),
       EAPercent = character(0),
+      EarlyPercent = character(0),
+      AheadPercent = character(0),
       StrikePercent = character(0),
       SwingPercent = character(0),
       WhiffPercent = character(0),
@@ -2300,7 +2533,7 @@ datatable_with_colvis <- function(df, lock = character(0), remember = TRUE, defa
     if (enable_color_mode) {
       color_cols <- switch(
         color_mode,
-        "Process" = c("InZone%","Comp%","Strike%","Swing%","FPS%","E+A%","1-1W%","QP%","Ctrl+","QP+","Stuff+","Pitching+","RV/100"),
+        "Process" = c("InZone%","Comp%","Strike%","Swing%","FPS%","Early%","Ahead%","E+A%","1-1W%","QP%","Ctrl+","QP+","Stuff+","Pitching+","RV/100"),
         "Live"    = c("InZone%","Strike%","FPS%","E+A%","QP+","Ctrl+","Pitching+","K%","BB%","Whiff%"),
         "Results" = c("Whiff%","K%","BB%","CSW%","GB%","Barrel%","EV"),
         "Bullpen" = c("InZone%","Comp%","Ctrl+","Stuff+"),
@@ -2378,13 +2611,13 @@ datatable_with_colvis <- function(df, lock = character(0), remember = TRUE, defa
 
 # Default column sets for the table-mode toggle
 stuff_cols        <- c("Pitch","#","Velo","Max","IVB","HB","rTilt","bTilt","SpinEff","Spin","Height","Side","Ext","VAA","HAA","Stuff+")
-process_cols      <- c("Pitch","#","BF","RV/100","InZone%","Comp%","Strike%","Swing%","FPS%","E+A%","1-1W%","QP%","Ctrl+","QP+","Pitching+")
+process_cols      <- c("Pitch","#","BF","RV/100","InZone%","Comp%","Strike%","Swing%","FPS%","Early%","Ahead%","E+A%","1-1W%","QP%","Ctrl+","QP+","Pitching+")
 results_cols      <- c("Pitch","#","BF","K%","BB%","GB%","Barrel%","Whiff%","CSW%","EV","LA")
 results_cols_live <- c("Pitch","#","BF","K%","BB%","GB%","Whiff%","CSW%","EV","LA","Pitching+")
 bullpen_cols      <- c("Pitch","#","Velo","Max","IVB","HB","Spin","bTilt","Height","Side","Ext","InZone%","Comp%","Ctrl+","Stuff+")
 live_cols         <- c("Pitch","#","Velo","Max","IVB","HB","FPS%","E+A%","InZone%","Strike%","Whiff%","K%","BB%","QP+")
 usage_cols        <- c("Pitch","#","Usage","0-0","Behind","Even","Ahead","<2K","2K")
-perf_cols         <- c("Pitch","#","BF","RV/100","InZone%","Comp%","Strike%","FPS%","E+A%","1-1W%","K%","BB%","Whiff%","CSW%","EV","LA","Ctrl+","QP+","Pitching+")
+perf_cols         <- c("Pitch","#","BF","RV/100","InZone%","Comp%","Strike%","FPS%","Early%","Ahead%","E+A%","1-1W%","K%","BB%","Whiff%","CSW%","EV","LA","Ctrl+","QP+","Pitching+")
 
 # ---- unified list for the pickers + a helper to compute visibility
 all_table_cols <- unique(c(stuff_cols, process_cols, results_cols, results_cols_live, bullpen_cols, live_cols, usage_cols, perf_cols, "Overall"))
@@ -2582,6 +2815,8 @@ get_process_thresholds <- function(column_name, pitch_type) {
   }
   if (column_name == "FPS%") return(list(poor = 55, avg = 60, great = 65))
   if (column_name == "E+A%" && pitch_type == "all") return(list(poor = 65, avg = 70, great = 75))
+  if (column_name == "1-1W%") return(list(poor = 58, avg = 63, great = 68))
+  if (column_name == "Ahead%") return(list(poor = 32, avg = 37, great = 42))
   if (column_name == "QP%") return(list(poor = 38, avg = 48, great = 58))
   if (column_name == "Ctrl+") return(list(poor = 75, avg = 85, great = 95))
   if (column_name == "QP+") return(list(poor = 75, avg = 90, great = 105))
@@ -2743,6 +2978,14 @@ enforce_process_order <- function(df) {
   if (all(c("BF","RV/100") %in% names(df))) df <- dplyr::relocate(df, `RV/100`, .after = `BF`)
   if (all(c("RV/100","Usage") %in% names(df))) df <- dplyr::relocate(df, Usage, .after = `RV/100`)
   else if (all(c("BF","Usage") %in% names(df))) df <- dplyr::relocate(df, Usage, .after = `BF`)
+  if (all(c("Early%","Ahead%") %in% names(df))) {
+    df <- dplyr::relocate(df, `Early%`, .before = `Ahead%`)
+  }
+  if (all(c("Ahead%","E+A%") %in% names(df))) {
+    df <- dplyr::relocate(df, `Ahead%`, .before = `E+A%`)
+  } else if (!("Ahead%" %in% names(df)) && all(c("Early%","E+A%") %in% names(df))) {
+    df <- dplyr::relocate(df, `Early%`, .before = `E+A%`)
+  }
   if (all(c("E+A%","1-1W%") %in% names(df))) df <- dplyr::relocate(df, `1-1W%`, .after = `E+A%`)
   if (all(c("1-1W%","QP%") %in% names(df))) {
     df <- dplyr::relocate(df, `QP%`, .after = `1-1W%`)
@@ -5371,6 +5614,38 @@ safe_pct <- function(num, den) {
          "")
 }
 
+count_state_mask <- function(balls, strikes, states) {
+  valid <- !is.na(balls) & !is.na(strikes)
+  if (!any(valid)) return(rep(FALSE, length(balls)))
+  mask <- rep(FALSE, length(balls))
+  for (state in states) {
+    mask <- mask | (valid & balls == state[1] & strikes == state[2])
+  }
+  mask
+}
+
+calc_state_pct <- function(df, states, calls) {
+  if (!is.data.frame(df) || !nrow(df)) return("")
+  bf <- calculate_bf(df)
+  if (!is.finite(bf) || bf <= 0) return("0.0%")
+  balls <- suppressWarnings(as.numeric(df$Balls))
+  strikes <- suppressWarnings(as.numeric(df$Strikes))
+  pitch_call <- if ("PitchCall" %in% names(df)) as.character(df$PitchCall) else rep(NA_character_, nrow(df))
+  mask <- count_state_mask(balls, strikes, states)
+  safe_pct(sum(mask & pitch_call %in% calls, na.rm = TRUE), bf)
+}
+
+calc_early_pct <- function(df) {
+  states <- list(c(0, 0), c(0, 1), c(1, 0), c(1, 1))
+  calc_state_pct(df, states, c("InPlay"))
+}
+
+calc_ahead_pct <- function(df) {
+  states <- list(c(0, 1), c(1, 1))
+  strike_calls <- c("StrikeCalled","StrikeSwinging","FoulBall","FoulBallFieldable","FoulBallNotFieldable")
+  calc_state_pct(df, states, strike_calls)
+}
+
 one_one_strike_calls <- c(
   "StrikeCalled", "StrikeSwinging",
   "FoulBall", "FoulBallFieldable", "FoulBallNotFieldable",
@@ -5643,6 +5918,8 @@ make_summary <- function(df, group_col = "TaggedPitchType") {
       
       FPSPercent = safe_pct(FPS_all, fps_opp),
       EAPercent  = safe_pct(EA_all,  fps_opp),
+      EarlyPercent = calc_early_pct(dplyr::cur_data_all()),
+      AheadPercent = calc_ahead_pct(dplyr::cur_data_all()),
       one_one_w_pct = calc_one_one_w_pct(dplyr::cur_data_all()),
       QPPercent  = safe_pct(QPCount, PitchCount),
       
@@ -5702,11 +5979,14 @@ make_summary <- function(df, group_col = "TaggedPitchType") {
       ReleaseTilt, BreakTilt, SpinEff, SpinRate,
       RelHeight, RelSide, VertApprAngle, HorzApprAngle, Extension,
       InZonePercent, CompPercent, KPercent, BBPercent, FPSPercent, EAPercent, one_one_w_pct, QPPercent,
-      StrikePercent, SwingPercent, WhiffPercent, EV, LA,
+      EarlyPercent, AheadPercent, StrikePercent, SwingPercent, WhiffPercent, EV, LA,
       `Stuff+`, `Ctrl+`, `QP+`, `Pitching+`
     ) %>%
-    # Conditionally remove UsagePct if it exists
-    dplyr::rename(`1-1W%` = one_one_w_pct) %>%
+    dplyr::rename(
+      `Early%` = EarlyPercent,
+      `Ahead%` = AheadPercent,
+      `1-1W%` = one_one_w_pct
+    ) %>%
     {if ("UsagePct" %in% names(.)) dplyr::select(., -UsagePct) else .}
 }
 
@@ -6700,7 +6980,11 @@ flatten_metrics_df <- function(df) {
       vals_num
     } else {
       vals_chr
-    }
+    } %>%
+      dplyr::mutate(
+        EarlyPercent = "",
+        AheadPercent = ""
+      )
   }
   
   # Apply flattening to all columns
@@ -10619,7 +10903,7 @@ mod_camps_server <- function(id, is_active = shiny::reactive(TRUE)) {
           dplyr::any_of(c("0-0","Behind","Even","Ahead","<2K","2K")),
           BF, `RV/100`,
           Velo, Max, IVB, HB, rTilt, bTilt, SpinEff, Spin, Height, Side, VAA, HAA, Ext,
-          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
+          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `Early%`, `Ahead%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
           `Stuff+`, `Ctrl+`, `QP+`, `Pitching+`
         ) %>%
         dplyr::mutate(
@@ -11815,6 +12099,8 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE), global_date
             safe_pct(sum(comp, na.rm = TRUE), sum(!is.na(comp))) },
             `Strike%`      = if (has_pc) safe_pct(strikes, nrow(df)) else "",
             `FPS%`         = safe_pct(fps_live, fps_opp),
+            `Early%`       = calc_early_pct(df),
+            `Ahead%`       = calc_ahead_pct(df),
             `E+A%`         = safe_pct(ea_live,  fps_opp),
             `1-1W%`        = one_one_pct,
             `QP%`          = qp_pct,
@@ -13392,7 +13678,7 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
       visible_set_for <- function(mode, custom) {
         base <- c(
           "Pitch","#","Usage","BF","IP","FIP","WHIP","Velo","Max","IVB","HB","rTilt","bTilt","SpinEff","Spin",
-          "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","E+A%","1-1W%",
+          "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","Early%","Ahead%","E+A%","1-1W%",
           "K%","BB%","Whiff%","EV","LA","Stuff+","Ctrl+","QP+","Pitching+",
           # Results-specific
           "PA","AB","AVG","SLG","OBP","OPS","wOBA","xWOBA","ISO","xISO","BABIP","GB%","Barrel%","Swing%","Whiff%","K%","BB%","EV","LA"
@@ -14340,6 +14626,8 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
           KPercent      = safe_pct(k_live, bf_live),
           BBPercent     = safe_pct(bb_live, bf_live),
           FPSPercent    = safe_pct(fps_live, fps_opp),
+          `Early%`      = calc_early_pct(df),
+          `Ahead%`      = calc_ahead_pct(df),
           EAPercent     = safe_pct(ea_live, fps_opp),
           StrikePercent = if (has_pc) safe_pct(strikes, nrow(df)) else "",
           SwingPercent  = safe_pct(sum(!is.na(df$PitchCall) & df$PitchCall %in% c("StrikeSwinging","FoulBallNotFieldable","FoulBallFieldable","FoulBall","InPlay"), na.rm = TRUE), nrow(df)),
@@ -14376,7 +14664,7 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
         dplyr::select(
           Pitch, `#`, Usage, BF,
           Velo, Max, IVB, HB, rTilt, bTilt, SpinEff, Spin, Height, Side, VAA, HAA, Ext,
-          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `E+A%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
+          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `Early%`, `Ahead%`, `E+A%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
           `Stuff+`, `Ctrl+`, `QP+`, `Pitching+`
         ) %>%
         dplyr::mutate(
@@ -19765,6 +20053,7 @@ server <- function(input, output, session) {
       },
       footer = tagList(
         modalButton("Cancel"),
+        actionButton("delete_selected_pitches", "Delete Selected Pitches", class = "btn-danger"),
         actionButton("confirm_pitch_edit", "Save Changes", class = "btn-primary")
       ),
       easyClose = FALSE
@@ -20141,9 +20430,9 @@ server <- function(input, output, session) {
   output$downloadPitchMods <- downloadHandler(
     filename = function() paste0("pitch_type_modifications_", format(Sys.Date(), "%Y%m%d"), ".csv"),
     content = function(file) {
-      db_path <- init_modifications_db()
-      con <- tryCatch(dbConnect(SQLite(), db_path), error = function(e) e)
-      if (inherits(con, "error")) {
+      init_modifications_db()
+      con <- mod_db_connect()
+      if (inherits(con, "error") || is.null(con)) {
         export_path <- get_modifications_export_path()
         if (file.exists(export_path)) {
           file.copy(export_path, file, overwrite = TRUE)
@@ -20153,7 +20442,9 @@ server <- function(input, output, session) {
         return()
       }
       on.exit(dbDisconnect(con), add = TRUE)
-      mods <- try(dbGetQuery(con, "SELECT * FROM modifications ORDER BY created_at"), silent = TRUE)
+      tbl <- as.character(pitch_mod_table_clause(con))
+      ns_clause <- pitch_mod_namespace_clause(con)
+      mods <- try(dbGetQuery(con, sprintf("SELECT * FROM %s WHERE namespace = %s ORDER BY created_at", tbl, ns_clause)), silent = TRUE)
       if (inherits(mods, "try-error") || !nrow(mods)) {
         readr::write_csv(data.frame(message = "No pitch edits saved yet"), file)
       } else {
@@ -21856,7 +22147,6 @@ server <- function(input, output, session) {
            paste0(round(100 * num / den, 1), "%"),
            "")
   }
-  
   nz_mean <- function(x) {
     x <- suppressWarnings(as.numeric(x))
     m <- mean(x, na.rm = TRUE)
@@ -21965,7 +22255,7 @@ server <- function(input, output, session) {
       if (!exists("visible_set_for")) {
         visible_set_for <- function(mode, custom) {
           base <- c("Pitch","#","Usage","BF","IP","FIP","WHIP","Velo","Max","IVB","HB","rTilt","bTilt","SpinEff","Spin",
-                    "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","E+A%","1-1W%","QP%",
+                    "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","Early%","Ahead%","E+A%","1-1W%","QP%",
                     "K%","BB%","Whiff%","EV","LA","Stuff+","Ctrl+","QP+","Pitching+",
                     # Results-specific common cols
                     "PA","AB","AVG","SLG","OBP","OPS","xWOBA","xISO","BABIP","GB%","Barrel%","Swing%","Whiff%","K%","BB%","EV","LA")
@@ -22918,6 +23208,8 @@ server <- function(input, output, session) {
             KPercent      = safe_pct(k_live, bf_live),
             BBPercent     = safe_pct(bb_live, bf_live),
             FPSPercent    = safe_pct(fps_live, fps_opp),
+            `Early%`      = calc_early_pct(df),
+            `Ahead%`      = calc_ahead_pct(df),
             EAPercent     = safe_pct(ea_live, fps_opp),
             StrikePercent = if (has_pc) safe_pct(strikes, nrow(df)) else "",
             SwingPercent  = swing_pct_all,
@@ -22965,7 +23257,7 @@ server <- function(input, output, session) {
           dplyr::any_of(c("0-0","Behind","Even","Ahead","<2K","2K")),
           BF,
           Velo, Max, IVB, HB, rTilt, bTilt, SpinEff, Spin, Height, Side, VAA, HAA, Ext,
-          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
+          `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `Early%`, `Ahead%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
           `Stuff+`, `Ctrl+`, `QP+`, `Pitching+`
         ) %>%
         dplyr::mutate(
@@ -23206,7 +23498,7 @@ server <- function(input, output, session) {
     if (!exists("visible_set_for")) {
       visible_set_for <- function(mode, custom) {
         base <- c("Pitch","#","Usage","BF","IP","FIP","WHIP","Velo","Max","IVB","HB","rTilt","bTilt","SpinEff","Spin",
-                  "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","E+A%","1-1W%","QP%",
+                  "Height","Side","VAA","HAA","Ext","InZone%","Comp%","Strike%","FPS%","Early%","Ahead%","E+A%","1-1W%","QP%",
                   "K%","BB%","Whiff%","EV","LA","Stuff+","Ctrl+","QP+","Pitching+",
                   # Results-specific
                   "PA","AB","AVG","SLG","OBP","OPS","xWOBA","xISO","BABIP","GB%","Barrel%","Swing%","Whiff%","K%","BB%","EV","LA"
@@ -23403,6 +23695,8 @@ server <- function(input, output, session) {
         OBP = safe_div(H + BBc_all + HBP_all, PAt),
         OPS = NA_real_,
         xWOBA = NA_real_, xISO = NA_real_, BABIP = NA_real_,
+        `Early%` = calc_early_pct(df),
+        `Ahead%` = calc_ahead_pct(df),
         `Swing%` = safe_div(swings, total_pitches),
         `Whiff%` = safe_div(whiffs, swings),
         `CSW%`   = safe_div(csw_all_num, total_pitches),
@@ -24182,7 +24476,7 @@ server <- function(input, output, session) {
         dplyr::any_of(c("0-0","Behind","Even","Ahead","<2K","2K")),
         BF,
         Velo, Max, IVB, HB, rTilt, bTilt, SpinEff, Spin, Height, Side, VAA, HAA, Ext,
-        `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
+        `InZone%`, `Comp%`, `Strike%`, `Swing%`, `FPS%`, `Early%`, `Ahead%`, `E+A%`, `1-1W%`, `QP%`, `K%`, `BB%`, `Whiff%`, EV, LA,
         `Stuff+`, `Ctrl+`, `QP+`, `Pitching+`
       ) %>%
       dplyr::mutate(
@@ -25361,6 +25655,7 @@ server <- function(input, output, session) {
       },
       footer = tagList(
         modalButton("Cancel"),
+        actionButton("delete_selected_pitches_summary", "Delete Selected Pitches", class = "btn-danger"),
         actionButton("confirm_pitch_edit_summary", "Save Changes", class = "btn-primary")
       ),
       easyClose = FALSE
@@ -25493,6 +25788,58 @@ server <- function(input, output, session) {
     removeModal()
     session$userData$selected_for_edit <- NULL
   })
+
+  observeEvent(input$delete_selected_pitches, {
+    req(session$userData$selected_for_edit)
+    selected_pitches <- session$userData$selected_for_edit
+    save_result <- save_pitch_modifications_db(selected_pitches, DELETE_PITCH_MARKER, delete = TRUE)
+    if (!isTRUE(save_result$success)) {
+      showNotification(
+        paste0("Could not store pitch deletions: ", save_result$error %||% "unknown error"),
+        type = "error", duration = 8
+      )
+      return()
+    }
+
+    current_data <- modified_pitch_data()
+    if (is.null(current_data)) current_data <- pitch_data_pitching
+    updated_data <- current_data
+    deleted_mask <- rep(FALSE, nrow(updated_data))
+
+    for (i in 1:nrow(selected_pitches)) {
+      p <- selected_pitches[i, ]
+      match_idx <- which(
+        updated_data$Pitcher == p$Pitcher &
+          updated_data$Date == p$Date &
+          abs(updated_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+          abs(updated_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+          abs(updated_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx)) {
+        deleted_mask[match_idx] <- TRUE
+      }
+    }
+
+    if (any(deleted_mask)) {
+      updated_data <- updated_data[!deleted_mask, , drop = FALSE]
+      modified_pitch_data(updated_data)
+    }
+
+    result <- load_pitch_modifications_db(pitch_data_pitching, verbose = FALSE)
+    modification_stats(list(
+      applied_count = result$applied_count,
+      total_modifications = result$total_modifications
+    ))
+
+    deleted_count <- save_result$count %||% length(which(deleted_mask))
+    showNotification(
+      sprintf("Deleted %d pitch(es)", deleted_count),
+      type = "message", duration = 5
+    )
+
+    removeModal()
+    session$userData$selected_for_edit <- NULL
+  })
   
   # Confirm pitch type changes (summary movement plot)
   observeEvent(input$confirm_pitch_edit_summary, {
@@ -25568,6 +25915,58 @@ server <- function(input, output, session) {
       type = "message", duration = 3
     )
     
+    removeModal()
+    session$userData$selected_for_edit_summary <- NULL
+  })
+
+  observeEvent(input$delete_selected_pitches_summary, {
+    req(session$userData$selected_for_edit_summary)
+    selected_pitches <- session$userData$selected_for_edit_summary
+    save_result <- save_pitch_modifications_db(selected_pitches, DELETE_PITCH_MARKER, delete = TRUE)
+    if (!isTRUE(save_result$success)) {
+      showNotification(
+        paste0("Could not store pitch deletions: ", save_result$error %||% "unknown error"),
+        type = "error", duration = 8
+      )
+      return()
+    }
+
+    current_data <- modified_pitch_data()
+    if (is.null(current_data)) current_data <- pitch_data_pitching
+    updated_data <- current_data
+    deleted_mask <- rep(FALSE, nrow(updated_data))
+
+    for (i in 1:nrow(selected_pitches)) {
+      p <- selected_pitches[i, ]
+      match_idx <- which(
+        updated_data$Pitcher == p$Pitcher &
+          updated_data$Date == p$Date &
+          abs(updated_data$RelSpeed - (p$RelSpeed %||% 0)) < 0.1 &
+          abs(updated_data$HorzBreak - (p$HorzBreak %||% 0)) < 0.1 &
+          abs(updated_data$InducedVertBreak - (p$InducedVertBreak %||% 0)) < 0.1
+      )
+      if (length(match_idx)) {
+        deleted_mask[match_idx] <- TRUE
+      }
+    }
+
+    if (any(deleted_mask)) {
+      updated_data <- updated_data[!deleted_mask, , drop = FALSE]
+      modified_pitch_data(updated_data)
+    }
+
+    result <- load_pitch_modifications_db(pitch_data_pitching, verbose = FALSE)
+    modification_stats(list(
+      applied_count = result$applied_count,
+      total_modifications = result$total_modifications
+    ))
+
+    deleted_count <- save_result$count %||% length(which(deleted_mask))
+    showNotification(
+      sprintf("Deleted %d pitch(es)", deleted_count),
+      type = "message", duration = 5
+    )
+
     removeModal()
     session$userData$selected_for_edit_summary <- NULL
   })
