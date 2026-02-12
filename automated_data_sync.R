@@ -1,8 +1,10 @@
 # Enhanced automated_data_sync.R
-# This version creates a flag file when new data is synced,
+# This version creates a flag file when new data is synced, 
 # which helps the app detect when to reapply pitch type modifications
 
-library(RCurl)
+# Copy this content to your automated_data_sync.R file
+
+library(curl)
 library(readr)
 library(dplyr)
 library(lubridate)
@@ -10,8 +12,8 @@ library(stringr)
 
 # Load CSV filtering utilities
 source("csv_filter_utils.R")
-
-# FTP credentials (practice and v3 use separate accounts)
+source("video_map_helpers.R")
+# FTP credentials
 PRACTICE_FTP <- list(
   host = "ftp.trackmanbaseball.com",
   user = "Jared Gaynor",
@@ -25,6 +27,7 @@ V3_FTP <- list(
 PRACTICE_FTP$userpwd <- paste0(PRACTICE_FTP$user, ":", PRACTICE_FTP$pass)
 V3_FTP$userpwd <- paste0(V3_FTP$user, ":", V3_FTP$pass)
 
+
 # Local data directories
 LOCAL_DATA_DIR      <- "data/"
 LOCAL_PRACTICE_DIR  <- file.path(LOCAL_DATA_DIR, "practice")
@@ -36,11 +39,17 @@ dir.create(LOCAL_PRACTICE_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(LOCAL_V3_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Function to list files in FTP directory
-list_ftp_files <- function(ftp_path, creds) {
-  url <- paste0("ftp://", creds$host, ftp_path)
+list_ftp_files <- function(ftp_path) {
+  url <- paste0("ftp://", FTP_HOST, ftp_path)
   tryCatch({
-    files <- getURL(url, userpwd = creds$userpwd, ftp.use.epsv = FALSE, dirlistonly = TRUE)
-    strsplit(files, "\n")[[1]]
+    handle <- curl::new_handle(userpwd = FTP_USERPWD)
+    # Request names-only directory listings so regex checks (MM/DD/CSV) work reliably.
+    curl::handle_setopt(handle, ftp_use_epsv = FALSE, dirlistonly = TRUE)
+    contents <- curl::curl_fetch_memory(url, handle = handle)$content
+    files <- rawToChar(contents)
+    entries <- strsplit(files, "\n", fixed = TRUE)[[1]]
+    entries <- trimws(gsub("\r", "", entries, fixed = TRUE))
+    entries[nzchar(entries)]
   }, error = function(e) {
     cat("Error listing files in", ftp_path, ":", e$message, "\n")
     character(0)
@@ -48,23 +57,32 @@ list_ftp_files <- function(ftp_path, creds) {
 }
 
 # Function to download CSV file (no filtering - app will handle filtering)
-download_csv <- function(remote_file, local_file, creds) {
+download_csv <- function(remote_file, local_file) {
+  # Check if this file should be excluded
   filename <- basename(remote_file)
   if (should_exclude_csv(filename)) {
     return(FALSE)
   }
+  # Skip if file already exists (incremental sync)
   if (file.exists(local_file)) {
     cat("Skipping existing file:", basename(local_file), "\n")
-    return(FALSE)
+    return(FALSE)  # Return FALSE so we don't count it as newly downloaded
   }
   
-  url <- paste0("ftp://", creds$host, remote_file)
+  url <- paste0("ftp://", FTP_HOST, remote_file)
+  
   tryCatch({
+    # Download file to temporary location using curl with proper credentials
     temp_file <- tempfile(fileext = ".csv")
-    bin <- RCurl::getBinaryURL(url, userpwd = creds$userpwd, ftp.use.epsv = FALSE)
+    handle <- curl::new_handle(userpwd = FTP_USERPWD)
+    curl::handle_setopt(handle, ftp_use_epsv = FALSE)
+    bin <- curl::curl_fetch_memory(url, handle = handle)$content
     writeBin(bin, temp_file)
+    
+    # Read data to check if valid
     data <- read_csv(temp_file, show_col_types = FALSE)
     
+    # Only save if we have data
     if (nrow(data) > 0) {
       write_csv(data, local_file)
       cat("Downloaded", nrow(data), "rows to", local_file, "\n")
@@ -75,6 +93,7 @@ download_csv <- function(remote_file, local_file, creds) {
       unlink(temp_file)
       return(FALSE)
     }
+    
   }, error = function(e) {
     cat("Error processing", remote_file, ":", e$message, "\n")
     return(FALSE)
@@ -89,37 +108,31 @@ sync_practice_data <- function() {
   
   for (yr in years) {
     practice_base_path <- paste0("/practice/", yr, "/")
-    months <- list_ftp_files(practice_base_path, PRACTICE_FTP)
-    month_dirs <- months[grepl("^\\d{2}$", months)]
+    months <- list_ftp_files(practice_base_path)
+    month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
     
     for (month_dir in month_dirs) {
       month_path <- paste0(practice_base_path, month_dir, "/")
       cat("Checking practice month:", yr, month_dir, "\n")
       
-      days <- list_ftp_files(month_path, PRACTICE_FTP)
-      day_dirs <- days[grepl("^\\d{2}$", days)]
+      days <- list_ftp_files(month_path)
+      day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
       
       for (day_dir in day_dirs) {
         day_path <- paste0(month_path, day_dir, "/")
         cat("Processing practice date:", yr, "/", month_dir, "/", day_dir, "\n")
         
-        files_in_day <- list_ftp_files(day_path, PRACTICE_FTP)
-        csv_path <- day_path
-        csv_files <- files_in_day
-
-        if ("CSV" %in% files_in_day) {
-          csv_path <- paste0(day_path, "CSV/")
-          csv_files <- list_ftp_files(csv_path, PRACTICE_FTP)
-        }
-
-        csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
+        files_in_day <- list_ftp_files(day_path)
+        csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+        
+        # Filter out files with "playerpositioning" in the name (allow unverified)
         csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
         
         for (file in csv_files) {
-          remote_path <- paste0(csv_path, file)
+          remote_path <- paste0(day_path, file)
           local_path <- file.path(LOCAL_PRACTICE_DIR, paste0("practice_", yr, "_", month_dir, "_", day_dir, "_", file))
           
-          if (download_csv(remote_path, local_path, PRACTICE_FTP)) {
+          if (download_csv(remote_path, local_path)) {
             downloaded_count <- downloaded_count + 1
           }
           
@@ -135,14 +148,20 @@ sync_practice_data <- function() {
 
 # Function to check if file date is in allowed ranges
 is_date_in_range <- function(file_path) {
+  # Extract date from file path (YYYY/MM/DD pattern)
   date_match <- stringr::str_match(file_path, "(20\\d{2})/(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])")
   
   if (is.na(date_match[1])) {
+    # If no date pattern found, include the file (safer approach)
     return(TRUE)
   }
   
   file_date <- as.Date(paste(date_match[2], date_match[3], date_match[4], sep = "-"))
+  
+  # Start date: August 1, 2025 (nothing before this)
   start_date <- as.Date("2025-08-10")
+  
+  # Include all data from August 1, 2025 onwards (no future year restrictions)
   return(file_date >= start_date)
 }
 
@@ -151,43 +170,55 @@ sync_v3_data <- function() {
   cat("Syncing v3 data with date filtering...\n")
   years <- as.character(2025:year(Sys.Date()))
   downloaded_count <- 0
+  seen_v3_files <- character(0)
   
   for (yr in years) {
     v3_base_path <- paste0("/v3/", yr, "/")
     
-    months <- list_ftp_files(v3_base_path, V3_FTP)
-    month_dirs <- months[grepl("^\\d{2}$", months)]
+    months <- list_ftp_files(v3_base_path)
+    month_dirs <- months[grepl("^\\d{2}$", months)]  # Match MM format
     
     for (month_dir in month_dirs) {
       month_path <- paste0(v3_base_path, month_dir, "/")
       cat("Checking month:", yr, month_dir, "\n")
       
-      days <- list_ftp_files(month_path, V3_FTP)
-      day_dirs <- days[grepl("^\\d{2}$", days)]
+      days <- list_ftp_files(month_path)
+      day_dirs <- days[grepl("^\\d{2}$", days)]  # Match DD format
       
       for (day_dir in day_dirs) {
         day_path <- paste0(month_path, day_dir, "/")
         full_date_path <- paste0(yr, "/", month_dir, "/", day_dir)
         
         if (!is_date_in_range(full_date_path)) {
-          next
+          next  # Skip this date
         }
         
         cat("Processing date:", full_date_path, "\n")
         
-        files_in_day <- list_ftp_files(day_path, V3_FTP)
+        files_in_day <- list_ftp_files(day_path)
         
         if ("CSV" %in% files_in_day) {
           csv_path <- paste0(day_path, "CSV/")
-          csv_files <- list_ftp_files(csv_path, V3_FTP)
+          csv_files <- list_ftp_files(csv_path)
           csv_files <- csv_files[grepl("\\.csv$", csv_files, ignore.case = TRUE)]
+          
+          # Filter out files with "playerpositioning" or "unverified" in v3 folder
           csv_files <- csv_files[!grepl("playerpositioning", csv_files, ignore.case = TRUE)]
           
           for (file in csv_files) {
+            if (!nzchar(file)) next
             remote_path <- paste0(csv_path, file)
+            # De-dupe by full remote path, not basename, so same filename on new dates is still synced.
+            file_key <- tolower(trimws(remote_path))
+            if (file_key %in% seen_v3_files) {
+              cat("Skipping duplicate v3 CSV suffix:", file, "(already processed)\n")
+              next
+            }
+            seen_v3_files <- c(seen_v3_files, file_key)
+
             local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
             
-            if (download_csv(remote_path, local_path, V3_FTP)) {
+            if (download_csv(remote_path, local_path)) {
               downloaded_count <- downloaded_count + 1
             }
             
@@ -195,13 +226,23 @@ sync_v3_data <- function() {
           }
         } else {
           csv_files <- files_in_day[grepl("\\.csv$", files_in_day, ignore.case = TRUE)]
+          
           csv_files <- csv_files[!grepl("playerpositioning|unverified", csv_files, ignore.case = TRUE)]
           
           for (file in csv_files) {
+            if (!nzchar(file)) next
             remote_path <- paste0(day_path, file)
+            # De-dupe by full remote path, not basename, so same filename on new dates is still synced.
+            file_key <- tolower(trimws(remote_path))
+            if (file_key %in% seen_v3_files) {
+              cat("Skipping duplicate v3 CSV suffix:", file, "(already processed)\n")
+              next
+            }
+            seen_v3_files <- c(seen_v3_files, file_key)
+
             local_path <- file.path(LOCAL_V3_DIR, paste0("v3_", yr, "_", month_dir, "_", day_dir, "_", file))
             
-            if (download_csv(remote_path, local_path, V3_FTP)) {
+            if (download_csv(remote_path, local_path)) {
               downloaded_count <- downloaded_count + 1
             }
             
@@ -219,6 +260,8 @@ sync_v3_data <- function() {
 # Function to remove duplicate data across all CSV files
 deduplicate_files <- function() {
   cat("Starting deduplication process...\n")
+  
+  # Get all CSV files in the data directory
   csv_files <- list.files(LOCAL_DATA_DIR, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
   
   if (length(csv_files) == 0) {
@@ -227,13 +270,18 @@ deduplicate_files <- function() {
   }
   
   all_data <- list()
+  file_sources <- list()
   
+  # Read all CSV files and track source
   for (file in csv_files) {
     tryCatch({
+      # Read all columns as character to avoid type conflicts
       data <- read_csv(file, show_col_types = FALSE, col_types = cols(.default = "c"))
       if (nrow(data) > 0) {
+        # Add source file info for tracking
         data$SourceFile <- basename(file)
         all_data[[length(all_data) + 1]] <- data
+        file_sources[[length(file_sources) + 1]] <- file
       }
     }, error = function(e) {
       cat("Error reading", file, ":", e$message, "\n")
@@ -245,16 +293,23 @@ deduplicate_files <- function() {
     return(FALSE)
   }
   
+  # Combine all data
   combined_data <- bind_rows(all_data)
-  key_cols <- c("Date", "Pitcher", "Batter", "PitchNo", "PlateLocSide", "PlateLocHeight",
+  
+  # Create deduplication key based on available columns
+  # Use common columns that should be unique per pitch
+  key_cols <- c("Date", "Pitcher", "Batter", "PitchNo", "PlateLocSide", "PlateLocHeight", 
                 "RelSpeed", "TaggedPitchType", "Balls", "Strikes")
+  
+  # Only use columns that actually exist
   available_key_cols <- intersect(key_cols, names(combined_data))
   
   if (length(available_key_cols) == 0) {
     cat("Warning: No key columns found for deduplication. Using all columns.\n")
-    available_key_cols <- setdiff(names(combined_data), "SourceFile")
+    available_key_cols <- names(combined_data)[!names(combined_data) %in% "SourceFile"]
   }
   
+  # Remove duplicates, keeping the first occurrence
   original_count <- nrow(combined_data)
   deduplicated_data <- combined_data %>%
     distinct(across(all_of(available_key_cols)), .keep_all = TRUE)
@@ -263,12 +318,15 @@ deduplicate_files <- function() {
   
   if (duplicates_removed > 0) {
     cat("Removed", duplicates_removed, "duplicate rows\n")
+    
+    # Split back by source and rewrite files
     for (source_file in unique(deduplicated_data$SourceFile)) {
       file_data <- deduplicated_data %>%
         filter(SourceFile == source_file) %>%
         select(-SourceFile)
       
       if (nrow(file_data) > 0) {
+        # Find the original file path
         original_path <- csv_files[basename(csv_files) == source_file]
         if (length(original_path) == 1) {
           write_csv(file_data, original_path)
@@ -283,10 +341,126 @@ deduplicate_files <- function() {
   return(duplicates_removed > 0)
 }
 
+normalize_name_list <- function(names) {
+  if (length(names) == 0) return(character(0))
+  names <- names[!is.na(names)]
+  names <- trimws(names)
+  names <- names[nzchar(names)]
+  unique(toupper(names))
+}
+
+load_team_filters <- function() {
+  filters <- list(
+    team_code = toupper(trimws(Sys.getenv("TEAM_CODE", ""))),
+    allowed_players = character(0)
+  )
+  config_path <- file.path("config", "school_config.R")
+  if (!file.exists(config_path)) {
+    return(filters)
+  }
+  env <- new.env(parent = baseenv())
+  tryCatch({
+    sys.source(config_path, envir = env)
+    if (!exists("school_config", envir = env, inherits = FALSE)) {
+      return(filters)
+    }
+    cfg <- get("school_config", envir = env, inherits = FALSE)
+    if (!is.null(cfg$team_code) && nzchar(trimws(cfg$team_code))) {
+      filters$team_code <- toupper(trimws(cfg$team_code))
+    }
+    players <- c(cfg$allowed_pitchers, cfg$allowed_hitters)
+    filters$allowed_players <- normalize_name_list(players)
+  }, error = function(e) {
+    cat("Unable to load school_config.R for filtering:", e$message, "\n")
+  })
+  filters
+}
+
+file_contains_patterns <- function(path, patterns) {
+  if (!length(patterns) || !file.exists(path)) return(TRUE)
+  patterns <- unique(patterns[nzchar(patterns)])
+  if (!length(patterns)) return(TRUE)
+
+  con <- file(path, "r")
+  on.exit(close(con))
+
+  repeat {
+    lines <- tryCatch(readLines(con, n = 512), error = function(e) character(0))
+    if (!length(lines)) break
+    upper_lines <- toupper(lines)
+    for (pattern in patterns) {
+      if (any(grepl(pattern, upper_lines, fixed = TRUE))) {
+        return(TRUE)
+      }
+    }
+  }
+
+  FALSE
+}
+
+is_team_specific_csv <- function(path, filters) {
+  if (!file.exists(path)) return(TRUE)
+  patterns <- filters$allowed_players
+  if (nzchar(filters$team_code)) {
+    patterns <- c(patterns, filters$team_code)
+  }
+  patterns <- unique(patterns[nzchar(patterns)])
+  if (!length(patterns)) return(TRUE)
+  file_contains_patterns(path, patterns)
+}
+
+extract_remote_basename <- function(path) {
+  base <- basename(path)
+  sub("^v3_\\d{4}_\\d{2}_\\d{2}_", "", base, perl = TRUE)
+}
+
+cleanup_irrelevant_team_csvs <- function(filters = list()) {
+  if (length(filters$allowed_players) == 0 && !nzchar(filters$team_code)) {
+    return(0L)
+  }
+
+  csv_dirs <- c(LOCAL_PRACTICE_DIR, LOCAL_V3_DIR)
+  removed <- 0L
+
+  for (dir in csv_dirs) {
+    csv_files <- list.files(dir, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
+    if (!length(csv_files)) next
+
+    for (csv in csv_files) {
+      keep <- tryCatch(
+        is_team_specific_csv(csv, filters),
+        error = function(e) {
+          cat("Unable to inspect", csv, ":", e$message, "\n")
+          TRUE
+        }
+      )
+      if (keep) next
+
+      remote_basename <- extract_remote_basename(csv)
+      if (file.remove(csv)) {
+        cat("Pruned non-team CSV:", csv, "\n")
+        if (nzchar(remote_basename)) {
+          add_csv_exclusion(remote_basename, comment = "Auto-pruned non-team data")
+        }
+        removed <- removed + 1L
+      } else {
+        cat("Failed to remove non-team CSV:", csv, "\n")
+      }
+    }
+  }
+
+  removed
+}
+
 # Main sync function
 main_sync <- function() {
-  cat("Starting UNM data sync at", as.character(Sys.time()), "\n")
+  cat("Starting VMI data sync at", as.character(Sys.time()), "\n")
+  
   start_time <- Sys.time()
+  team_filters <- load_team_filters()
+  
+  # Only clean old files if this is the first run (no last_sync.txt exists)
+  # This prevents re-downloading everything on subsequent runs
   last_sync_file <- file.path(LOCAL_DATA_DIR, "last_sync.txt")
   if (!file.exists(last_sync_file)) {
     cat("First run detected - cleaning old data files\n")
@@ -299,27 +473,52 @@ main_sync <- function() {
     cat("Incremental sync - keeping existing files\n")
   }
   
+  # Sync both data sources
   practice_updated <- sync_practice_data()
   v3_updated <- sync_v3_data()
   
   end_time <- Sys.time()
   duration <- difftime(end_time, start_time, units = "mins")
+  
   cat("Data sync completed in", round(duration, 2), "minutes\n")
   
+  # Deduplicate downloaded files if any data was updated
   if (practice_updated || v3_updated) {
     deduplicate_files()
   }
+
+  cleanup_count <- cleanup_irrelevant_team_csvs(team_filters)
+  if (cleanup_count > 0) {
+    cat("Removed", cleanup_count, "non-team CSV files during cleanup\n")
+  }
   
+  # Update last sync timestamp and modification notification
   writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "last_sync.txt"))
+  
+  # Create a flag file to indicate new data is available
   if (practice_updated || v3_updated) {
     writeLines(as.character(Sys.time()), file.path(LOCAL_DATA_DIR, "new_data_flag.txt"))
   }
+
+  video_updated <- tryCatch(
+    sync_video_map_from_neon(file.path(LOCAL_DATA_DIR, "video_map.csv")),
+    error = function(e) {
+      cat("Skipping Neon video map sync:", e$message, "\n")
+      FALSE
+    }
+  )
+  if (video_updated) {
+    cat("Regenerated data/video_map.csv from Neon video metadata\n")
+  }
   
-  return(practice_updated || v3_updated)
+  # Return TRUE if any data was updated
+  return(practice_updated || v3_updated || video_updated)
 }
 
+# Run if called directly
 if (!interactive()) {
   data_updated <- main_sync()
+  # Always exit successfully - no new data is normal for incremental sync
   if (!data_updated) {
     cat("No new data found during sync - this is normal for incremental sync\n")
   } else {
