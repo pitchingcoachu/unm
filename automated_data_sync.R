@@ -27,6 +27,12 @@ V3_FTP <- list(
 PRACTICE_FTP$userpwd <- paste0(PRACTICE_FTP$user, ":", PRACTICE_FTP$pass)
 V3_FTP$userpwd <- paste0(V3_FTP$user, ":", V3_FTP$pass)
 
+resolve_ftp_config <- function(ftp_path) {
+  path <- tolower(trimws(ftp_path))
+  if (startsWith(path, "/v3/")) return(V3_FTP)
+  if (startsWith(path, "/practice/")) return(PRACTICE_FTP)
+  PRACTICE_FTP
+}
 
 # Local data directories
 LOCAL_DATA_DIR      <- "data/"
@@ -40,9 +46,10 @@ dir.create(LOCAL_V3_DIR, recursive = TRUE, showWarnings = FALSE)
 
 # Function to list files in FTP directory
 list_ftp_files <- function(ftp_path) {
-  url <- paste0("ftp://", FTP_HOST, ftp_path)
+  cfg <- resolve_ftp_config(ftp_path)
+  url <- paste0("ftp://", cfg$host, ftp_path)
   tryCatch({
-    handle <- curl::new_handle(userpwd = FTP_USERPWD)
+    handle <- curl::new_handle(userpwd = cfg$userpwd)
     # Request names-only directory listings so regex checks (MM/DD/CSV) work reliably.
     curl::handle_setopt(handle, ftp_use_epsv = FALSE, dirlistonly = TRUE)
     contents <- curl::curl_fetch_memory(url, handle = handle)$content
@@ -69,12 +76,13 @@ download_csv <- function(remote_file, local_file) {
     return(FALSE)  # Return FALSE so we don't count it as newly downloaded
   }
   
-  url <- paste0("ftp://", FTP_HOST, remote_file)
+  cfg <- resolve_ftp_config(remote_file)
+  url <- paste0("ftp://", cfg$host, remote_file)
   
   tryCatch({
     # Download file to temporary location using curl with proper credentials
     temp_file <- tempfile(fileext = ".csv")
-    handle <- curl::new_handle(userpwd = FTP_USERPWD)
+    handle <- curl::new_handle(userpwd = cfg$userpwd)
     curl::handle_setopt(handle, ftp_use_epsv = FALSE)
     bin <- curl::curl_fetch_memory(url, handle = handle)$content
     writeBin(bin, temp_file)
