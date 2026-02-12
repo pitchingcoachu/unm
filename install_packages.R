@@ -6,6 +6,8 @@
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 options(timeout = 300)
 
+Sys.setenv(R_LIBS_USER = "packrat/lib-R")
+
 cat("CBU Baseball Analytics - Package Installation\n")
 cat("=============================================\n")
 
@@ -72,11 +74,11 @@ app_packages <- c(
   "httr2",
   "MASS",
   "curl",
+  "RCurl",
   "akima",
   "plotly",
-  "RCurl",
   "jsonlite",
-  "ggiraph",   # now treated as required
+  "ggiraph",
   "colourpicker",
   "memoise",
   "shinymanager",
@@ -87,11 +89,11 @@ app_packages <- c(
   "digest"
 )
 
-
 cat("\nInstalling app-specific packages...\n")
 for (pkg in app_packages) {
   install_package_safe(pkg, critical = TRUE)
 }
+
 # Optional packages (nice to have but not critical)
 optional_packages <- character(0)
 
