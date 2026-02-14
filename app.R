@@ -5408,6 +5408,58 @@ school_marker_tokens <- function() {
   toks[nzchar(toks)]
 }
 
+row_matches_school_markers <- function(df, cols, tokens = school_marker_tokens()) {
+  cols <- intersect(cols, names(df))
+  if (!length(cols) || !length(tokens) || !nrow(df)) return(rep(FALSE, nrow(df)))
+  out <- rep(FALSE, nrow(df))
+  for (col in cols) {
+    vals <- toupper(trimws(as.character(df[[col]])))
+    hit <- rep(FALSE, nrow(df))
+    for (tok in tokens) hit <- hit | grepl(tok, vals, fixed = TRUE)
+    out <- out | hit
+  }
+  out
+}
+
+live_bp_mask <- function(df) {
+  if (!nrow(df)) return(logical(0))
+  is_live <- as.character(df$SessionType) == "Live"
+  p_cols <- intersect(c("PitcherTeam", "PitcherTeamCode", "PitcherTeamForeignID"), names(df))
+  b_cols <- intersect(c("BatterTeam", "BatterTeamCode", "BatterTeamForeignID"), names(df))
+  if (!length(p_cols)) p_cols <- intersect(c("HomeTeam", "AwayTeam", "HomeTeamForeignID", "AwayTeamForeignID"), names(df))
+  if (!length(b_cols)) b_cols <- intersect(c("HomeTeam", "AwayTeam", "HomeTeamForeignID", "AwayTeamForeignID"), names(df))
+  p_mark <- row_matches_school_markers(df, p_cols)
+  b_mark <- row_matches_school_markers(df, b_cols)
+  is_live & p_mark & b_mark
+}
+
+season_mask <- function(df) {
+  if (!nrow(df)) return(logical(0))
+  is_live <- as.character(df$SessionType) == "Live"
+  p_cols <- intersect(c("PitcherTeam", "PitcherTeamCode", "PitcherTeamForeignID"), names(df))
+  b_cols <- intersect(c("BatterTeam", "BatterTeamCode", "BatterTeamForeignID"), names(df))
+  if (!length(p_cols)) p_cols <- intersect(c("HomeTeam", "AwayTeam", "HomeTeamForeignID", "AwayTeamForeignID"), names(df))
+  if (!length(b_cols)) b_cols <- intersect(c("HomeTeam", "AwayTeam", "HomeTeamForeignID", "AwayTeamForeignID"), names(df))
+  p_mark <- row_matches_school_markers(df, p_cols)
+  b_mark <- row_matches_school_markers(df, b_cols)
+  is_live & xor(p_mark, b_mark)
+}
+
+apply_session_type_filter <- function(df, session_value) {
+  if (is.null(session_value) || !length(session_value)) return(df)
+  sel <- as.character(session_value[[1]])
+  if (!nzchar(sel) || identical(sel, "All")) return(df)
+  if (identical(sel, "Bullpen")) return(dplyr::filter(df, SessionType == "Bullpen"))
+  if (identical(sel, "Season")) return(df[season_mask(df), , drop = FALSE])
+  # "Live" value is shown as "Live BP" in UI
+  if (identical(sel, "Live")) return(df[live_bp_mask(df), , drop = FALSE])
+  df
+}
+
+session_type_choices <- function() {
+  c("Season", "Bullpen", "Live BP" = "Live", "All")
+}
+
 verify_allowed_players_by_school <- function(df, player_col, allowed_names, label = "players") {
   allowed_names <- unique(as.character(allowed_names))
   allowed_names <- allowed_names[nzchar(trimws(allowed_names))]
@@ -6568,8 +6620,8 @@ pitch_ui <- function(show_header = FALSE) {
       sidebarPanel(
         selectInput(
           "sessionType", "Session Type:",
-          choices = c("All", "Bullpen", "Live"),
-          selected = "All"
+          choices = session_type_choices(),
+          selected = "Season"
         ),
         selectInput(
           "withVideo", "With Video:",
@@ -7410,7 +7462,7 @@ mod_hit_server <- function(id, is_active = shiny::reactive(TRUE), global_date_ra
         }
         if ("Session Type" %in% sel) {
           out <- c(out, list(
-            selectInput(ns(paste0("cell_session_", cell_id)), "Session Type:", choices = c("All","Bullpen","Live"), selected = "All")
+            selectInput(ns(paste0("cell_session_", cell_id)), "Session Type:", choices = session_type_choices(), selected = "Season")
           ))
         }
         if ("Pitch Types" %in% sel) {
@@ -9963,7 +10015,7 @@ mod_catch_ui <- function(id, show_header = FALSE) {
     sidebarLayout(
       sidebarPanel(
         # Exact same main sidebar as Pitching, but with Catcher selector
-        selectInput(ns("sessionType"), "Session Type:", choices = c("All","Bullpen","Live"), selected = "All"),
+        selectInput(ns("sessionType"), "Session Type:", choices = session_type_choices(), selected = "Season"),
         selectInput(ns("catcher"), "Select Catcher:", choices = c("All" = "All", catcher_map), selected = "All"),
         selectInput(
           ns("teamType"), "Team:",
@@ -10201,8 +10253,7 @@ mod_catch_server <- function(id, is_active = shiny::reactive(TRUE), global_date_
       pitch_types <- if (is.null(input$pitchType)) "All" else input$pitchType
       
       # Session type first
-      df <- if (identical(input$sessionType, "All")) pitch_data
-      else dplyr::filter(pitch_data, SessionType == input$sessionType)
+      df <- apply_session_type_filter(pitch_data, input$sessionType)
       
       # ⛔️ Team filtering - Filter by team selection ⛔️
       if (!is.null(input$teamType)) {
@@ -12320,7 +12371,7 @@ mod_leader_ui <- function(id, show_header = FALSE) {
         selectInput(ns("teamType"), "Team:", choices = TEAM_CHOICES, selected = "All"),
         
         # --- Common filters (apply to all domains) ---
-        selectInput(ns("sessionType"), "Session Type:", choices = c("All","Bullpen","Live"), selected = "All"),
+        selectInput(ns("sessionType"), "Session Type:", choices = session_type_choices(), selected = "Season"),
         dateRangeInput(ns("dates"), "Date Range:",
                        start = max(pitch_data$Date, na.rm = TRUE),
                        end   = max(pitch_data$Date, na.rm = TRUE),
@@ -12481,9 +12532,9 @@ mod_leader_server <- function(id, is_active = shiny::reactive(TRUE), global_date
       
       base <- switch(
         input$domain,
-        "Pitching" = if (input$sessionType == "All") modified_data else dplyr::filter(modified_data, SessionType == input$sessionType),
-        "Hitting"  = if (input$sessionType == "All") pitch_data else dplyr::filter(pitch_data, SessionType == input$sessionType),
-        "Catching" = if (input$sessionType == "All") pitch_data else dplyr::filter(pitch_data, SessionType == input$sessionType)
+        "Pitching" = apply_session_type_filter(modified_data, input$sessionType),
+        "Hitting"  = apply_session_type_filter(pitch_data, input$sessionType),
+        "Catching" = apply_session_type_filter(pitch_data, input$sessionType)
       )
       
       # Filter by team selection
@@ -13481,8 +13532,8 @@ mod_comp_ui <- function(id, show_header = FALSE) {
             wellPanel(
               selectInput(
                 ns("cmpA_sessionType"), "Session Type:",
-                choices  = c("All","Bullpen","Live"),
-                selected = "Live"
+                choices  = session_type_choices(),
+                selected = "Season"
               ),
               dateRangeInput(
                 ns("cmpA_dates"), "Date Range:",
@@ -13586,8 +13637,8 @@ mod_comp_ui <- function(id, show_header = FALSE) {
             wellPanel(
               selectInput(
                 ns("cmpB_sessionType"), "Session Type:",
-                choices  = c("All","Bullpen","Live"),
-                selected = "Live"
+                choices  = session_type_choices(),
+                selected = "Season"
               ),
               dateRangeInput(
                 ns("cmpB_dates"), "Date Range:",
@@ -13904,20 +13955,7 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
     
     .last_date_for <- function(dom, player, st) {
       df <- pitch_data
-      # normalize once
-      if (!"SessionType_std" %in% names(df)) {
-        df$SessionType_std <- {
-          x0 <- tolower(trimws(as.character(df$SessionType)))
-          dplyr::case_when(
-            grepl("bull", x0)         ~ "Bullpen",
-            grepl("live|game|ab", x0) ~ "Live",
-            TRUE                      ~ "Other"
-          )
-        }
-      }
-      if (!is.null(st) && st != "All") {
-        df <- df[df$SessionType_std == st, , drop = FALSE]
-      }
+      df <- apply_session_type_filter(df, st)
       if (isTRUE(player == "All") || is.null(player) || !nzchar(player)) {
         return(suppressWarnings(max(df$Date, na.rm = TRUE)))
       }
@@ -13975,7 +14013,7 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
       
       req(dates)
       if (is.null(ptypes)) ptypes <- "All"
-      if (is.null(stype)  || !nzchar(stype)) stype <- "Live"
+      if (is.null(stype)  || !nzchar(stype)) stype <- "Season"
       
       df <- if (identical(dom, "Pitcher") && exists("pitch_data_pitching")) pitch_data_pitching else pitch_data
       if (!nrow(df)) return(df[0, , drop = FALSE])
@@ -13992,10 +14030,6 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
         }
       }
       if (!nrow(df)) return(df)
-      
-      if (!("SessionType_std" %in% names(df))) {
-        df$SessionType_std <- normalize_session_type(df$SessionType)
-      }
       
       df <- dplyr::filter(df, as.Date(Date) >= as.Date(dates[1]),
                           as.Date(Date) <= as.Date(dates[2]))
@@ -14035,12 +14069,12 @@ mod_comp_server <- function(id, is_active = shiny::reactive(TRUE), global_date_r
       # If team_type == "All", no team filtering is applied
       if (!nrow(df)) return(df)
       
-      if (stype != "All") df <- df[df$SessionType_std == stype, , drop = FALSE]
+      df <- apply_session_type_filter(df, stype)
       if (!nrow(df)) return(df)
       
       if (!is.null(hand) && hand != "All") df <- dplyr::filter(df, PitcherThrows == hand)
       if (!is.null(bats) && bats != "All") {
-        st_std <- df$SessionType_std
+        st_std <- normalize_session_type(df$SessionType)
         df <- df %>% dplyr::filter(st_std != "Live" | (st_std == "Live" & BatterSide == bats))
       }
       if (!nrow(df)) return(df)
@@ -16698,8 +16732,8 @@ custom_reports_server <- function(id) {
           existing_session <- input[[paste0("cell_session_", cell_id)]] %||% saved_cell$session %||% NULL
           out <- c(out, list(
             selectInput(ns(paste0("cell_session_", cell_id)), "Session Type:",
-                        choices = c("All","Bullpen","Live"), 
-                        selected = if (!is.null(existing_session)) existing_session else "All")
+                        choices = session_type_choices(), 
+                        selected = if (!is.null(existing_session)) existing_session else "Season")
           ))
         }
         if ("Pitch Types" %in% sel) {
@@ -17333,10 +17367,9 @@ custom_reports_server <- function(id) {
         v
       }
       session <- safe_values(session)
-      if (!is.null(session) && !all(session == "All")) {
-        if (!("All" %in% session)) {
-          df <- df %>% dplyr::filter(SessionType %in% session)
-        }
+      if (!is.null(session) && length(session)) {
+        session_val <- if ("All" %in% session) "All" else session[1]
+        df <- apply_session_type_filter(df, session_val)
       }
 
       pitch_types <- pitch_types %||% character(0)
@@ -17437,7 +17470,7 @@ custom_reports_server <- function(id) {
         players = players,
         report_type = input$report_type,
         dates = input[[paste0("cell_dates_", filter_cell_id)]] %||% cell_state$dates,
-        session = input[[paste0("cell_session_", filter_cell_id)]] %||% cell_state$session %||% "All",
+        session = input[[paste0("cell_session_", filter_cell_id)]] %||% cell_state$session %||% "Season",
         pitch_types = input[[paste0("cell_pitch_types_", filter_cell_id)]] %||% cell_state$pitch_types,
         batter_side = input[[paste0("cell_batter_side_", filter_cell_id)]] %||% cell_state$batter_side,
         pitcher_hand = input[[paste0("cell_pitcher_hand_", filter_cell_id)]] %||% cell_state$pitcher_hand,
@@ -19036,8 +19069,8 @@ player_plans_ui <- function() {
                       selected = NULL),
           
           selectInput("pp_session_type", "Session Type:",
-                      choices = c("All", "Bullpen", "Live"),
-                      selected = "All"),
+                      choices = session_type_choices(),
+                      selected = "Season"),
           
           dateRangeInput("pp_date_range", "Date Range:",
                          start = Sys.Date() - 30,
@@ -26421,7 +26454,7 @@ deg_to_clock <- function(x) {
     # pull current filters
     ds <- input$dates[1]; de <- input$dates[2]
     pit <- input$pitcher %or% "All"
-    st  <- input$sessionType %or% "All"
+    st  <- input$sessionType %or% "Season"
     sui <- current_suite()
     pag <- current_page()
     
@@ -26622,8 +26655,7 @@ deg_to_clock <- function(x) {
   # Set date once on startup
   observeEvent(TRUE, {
     req(input$sessionType, input$pitcher)
-    df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+    df_base <- apply_session_type_filter(pitch_data_pitching, input$sessionType)
     
     last_date <- if (input$pitcher == "All") {
       max(df_base$Date, na.rm = TRUE)
@@ -26725,7 +26757,7 @@ deg_to_clock <- function(x) {
     # --- context for the note ---
     ds <- input$dates[1]; de <- input$dates[2]
     pit <- input$pitcher     %or% "All"
-    st  <- input$sessionType %or% "All"
+    st  <- input$sessionType %or% "Season"
     sui <- current_suite();  pag <- current_page()
     page_combo <- paste0(sui, "::", pag %or% "")
     
@@ -26934,8 +26966,7 @@ deg_to_clock <- function(x) {
   output$pitcher_ui <- renderUI({
     req(input$sessionType, input$teamType)
     
-    df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+    df_base <- apply_session_type_filter(pitch_data_pitching, input$sessionType)
     
     # Apply team filtering to get the available pitchers
     if (input$teamType == "Campers") {
@@ -27000,8 +27031,7 @@ deg_to_clock <- function(x) {
   observeEvent(list(input$sessionType, input$teamType), {
     req(input$sessionType, input$teamType)
     
-    df_base <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+    df_base <- apply_session_type_filter(pitch_data_pitching, input$sessionType)
     
     # Apply team filtering
     if (input$teamType == "Campers") {
@@ -27032,8 +27062,7 @@ deg_to_clock <- function(x) {
     pitch_types <- if (is.null(input$pitchType) || !length(input$pitchType)) "All" else input$pitchType
     
     # Session type - use modified data instead of original
-    df <- if (identical(input$sessionType, "All")) modified_pitch_data()
-    else dplyr::filter(modified_pitch_data(), SessionType == input$sessionType)
+    df <- apply_session_type_filter(modified_pitch_data(), input$sessionType)
     
     # ⛔️ Team filtering - Filter by team selection ⛔️
     if (!is.null(input$teamType)) {
@@ -27149,8 +27178,7 @@ deg_to_clock <- function(x) {
     pitch_types <- if (is.null(input$pitchType)) "All" else input$pitchType
     
     # first, honor Session Type
-    df <- if (input$sessionType == "All") pitch_data_pitching else
-      dplyr::filter(pitch_data_pitching, SessionType == input$sessionType)
+    df <- apply_session_type_filter(pitch_data_pitching, input$sessionType)
     
     # Live-only BatterSide filter
     if (!is.null(input$batterSide) && input$batterSide != "All") {
@@ -27434,9 +27462,7 @@ deg_to_clock <- function(x) {
     have_valid_range <- is.finite(date_start) && is.finite(date_end)
     
     # Session Type
-    if (!is.null(input$sessionType) && input$sessionType != "All") {
-      df <- dplyr::filter(df, SessionType == input$sessionType)
-    }
+    df <- apply_session_type_filter(df, input$sessionType)
     
     # Keep warmups out; DO NOT drop blank TaggedPitchType here
     if ("PitchSession" %in% names(df)) {
@@ -34439,7 +34465,7 @@ deg_to_clock <- function(x) {
           plan <- get_current_plan(input$pp_player_select)
           
           # Update all inputs with the loaded values
-          updateSelectInput(session, "pp_session_type", selected = plan$session_type %||% "All")
+          updateSelectInput(session, "pp_session_type", selected = plan$session_type %||% "Season")
           updateSelectInput(session, "pp_goal1_type", selected = plan$goal1_type)
           updateSelectInput(session, "pp_goal1_stuff_category", selected = plan$goal1_stuff_category)
           updateSelectInput(session, "pp_goal1_velocity_pitch", selected = plan$goal1_velocity_pitch)
@@ -34498,7 +34524,7 @@ deg_to_clock <- function(x) {
     if (is.null(plan)) {
       # Create default empty plan
       plan <- list(
-        session_type = "All",
+        session_type = "Season",
         goal1_type = "", goal1_stuff_category = "", goal1_velocity_pitch = "All",
         goal1_movement_pitch = "All", goal1_movement_type = character(0),
         goal1_movement_display = c("Averages and Pitches"),
@@ -34536,7 +34562,7 @@ deg_to_clock <- function(x) {
     if (is.null(player) || player == "") return()
     
     plan <- list(
-      session_type = input$pp_session_type %||% "All",
+      session_type = input$pp_session_type %||% "Season",
       goal1_type = input$pp_goal1_type %||% "",
       goal1_stuff_category = input$pp_goal1_stuff_category %||% "",
       goal1_velocity_pitch = input$pp_goal1_velocity_pitch %||% "All",
@@ -34645,7 +34671,7 @@ deg_to_clock <- function(x) {
     
     # Update all inputs with saved values (using isolate to prevent recursion)
     isolate({
-      updateSelectInput(session, "pp_session_type", selected = plan$session_type %||% "All")
+      updateSelectInput(session, "pp_session_type", selected = plan$session_type %||% "Season")
       updateSelectInput(session, "pp_goal1_type", selected = plan$goal1_type)
       updateSelectInput(session, "pp_goal1_stuff_category", selected = plan$goal1_stuff_category)
       updateSelectInput(session, "pp_goal1_velocity_pitch", selected = plan$goal1_velocity_pitch)
