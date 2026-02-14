@@ -4,7 +4,7 @@ school_config <- list(
   team_code = "UNM",
   # Additional school-code markers used in TrackMan team columns (optional).
   # These are checked alongside team_code during allowed-player verification.
-  team_code_markers = c("SOU_RED", "UNM"),
+  team_code_markers = c("UNL_REB", "UNM", "MEX_LOB"),
   allowed_pitchers = c(
     "White, Tommy",
     "Alvarez, Diego",
