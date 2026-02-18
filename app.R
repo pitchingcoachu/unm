@@ -1179,6 +1179,23 @@ delete_rows_for_school_codes <- function(con, table_name, codes) {
   invisible(TRUE)
 }
 
+delete_rows_for_key_values <- function(con, table_name, key_col, keys) {
+  keys <- unique(trimws(as.character(keys %||% character(0))))
+  keys <- keys[nzchar(keys)]
+  if (!length(keys)) return(invisible(FALSE))
+  quoted <- vapply(keys, function(k) as.character(DBI::dbQuoteString(con, k)), character(1))
+  sql <- sprintf("DELETE FROM %s WHERE %s IN (%s)", table_name, key_col, paste(quoted, collapse = ", "))
+  DBI::dbExecute(con, sql)
+  invisible(TRUE)
+}
+
+dedupe_named_list <- function(x) {
+  nms <- names(x)
+  if (is.null(nms) || !length(nms)) return(x)
+  keep <- !duplicated(nms, fromLast = TRUE)
+  x[keep]
+}
+
 init_state_db <- function() {
   con <- state_db_connect()
   on.exit(DBI::dbDisconnect(con), add = TRUE)
@@ -1244,6 +1261,7 @@ load_custom_tables_db <- function() {
 }
 
 save_custom_tables_db <- function(x) {
+  x <- dedupe_named_list(x)
   con <- state_db_connect()
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   touched_codes <- unique(c(
@@ -1252,6 +1270,7 @@ save_custom_tables_db <- function(x) {
   ))
   delete_rows_for_school_codes(con, "custom_tables", touched_codes)
   if (!length(x)) return(invisible(TRUE))
+  delete_rows_for_key_values(con, "custom_tables", "name", names(x))
   payload <- data.frame(
     name = names(x),
     cols = vapply(x, function(v) jsonlite::toJSON(v, auto_unbox = TRUE), character(1)),
@@ -1281,6 +1300,7 @@ load_custom_reports_db <- function() {
 }
 
 save_custom_reports_db <- function(x) {
+  x <- dedupe_named_list(x)
   con <- state_db_connect()
   on.exit(DBI::dbDisconnect(con), add = TRUE)
   touched_codes <- unique(c(
@@ -1289,6 +1309,7 @@ save_custom_reports_db <- function(x) {
   ))
   delete_rows_for_school_codes(con, "custom_reports", touched_codes)
   if (!length(x)) return(invisible(TRUE))
+  delete_rows_for_key_values(con, "custom_reports", "name", names(x))
   payload <- data.frame(
     name = names(x),
     payload = vapply(x, function(v) jsonlite::toJSON(v, auto_unbox = TRUE), character(1)),
@@ -34760,6 +34781,7 @@ deg_to_clock <- function(x) {
     out
   }
   save_player_plans_db <- function(plans) {
+    plans <- dedupe_named_list(plans)
     con <- state_db_connect()
     on.exit(DBI::dbDisconnect(con), add = TRUE)
     touched_codes <- unique(c(
@@ -34768,6 +34790,7 @@ deg_to_clock <- function(x) {
     ))
     delete_rows_for_school_codes(con, "player_plans", touched_codes)
     if (!length(plans)) return(invisible(TRUE))
+    delete_rows_for_key_values(con, "player_plans", "player", names(plans))
     payload <- data.frame(
       player = names(plans),
       payload = vapply(plans, function(v) jsonlite::toJSON(v, auto_unbox = TRUE), character(1)),
@@ -34796,6 +34819,7 @@ deg_to_clock <- function(x) {
     out
   }
   save_completed_goals_db <- function(goals) {
+    goals <- dedupe_named_list(goals)
     con <- state_db_connect()
     on.exit(DBI::dbDisconnect(con), add = TRUE)
     touched_codes <- unique(c(
@@ -34804,6 +34828,7 @@ deg_to_clock <- function(x) {
     ))
     delete_rows_for_school_codes(con, "completed_goals", touched_codes)
     if (!length(goals)) return(invisible(TRUE))
+    delete_rows_for_key_values(con, "completed_goals", "player", names(goals))
     payload <- data.frame(
       player = names(goals),
       payload = vapply(goals, function(v) jsonlite::toJSON(v, auto_unbox = TRUE), character(1)),
