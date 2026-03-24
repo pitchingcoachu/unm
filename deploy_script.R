@@ -90,7 +90,7 @@ deploy_app <- function() {
     deployApp(
       appDir = ".",
       appFiles = keep,
-      appName = "lsubaseball",
+      appName = "unmbaseball",
       forceUpdate = TRUE,
       launch.browser = FALSE,
       logLevel = "verbose"
