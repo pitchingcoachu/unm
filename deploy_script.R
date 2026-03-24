@@ -1,0 +1,121 @@
+# deploy_script.R
+# VMI Baseball App Deployment Script
+# Deploys the Shiny app to shinyapps.io
+
+# Set CRAN repository
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+
+# Load required libraries
+suppressPackageStartupMessages({
+  if (!requireNamespace("rsconnect", quietly = TRUE)) {
+    install.packages("rsconnect", dependencies = TRUE)
+  }
+  library(rsconnect)
+})
+
+# Deploy to shinyapps.io
+deploy_app <- function() {
+  tryCatch({
+    cat("Starting deployment of Harvard app...\n")
+    if (file.exists(".Renviron")) {
+      readRenviron(".Renviron")
+    }
+    
+    # Run package installation script
+    cat("Running package installation script...\n")
+    if (file.exists("install_packages.R")) {
+      system2("Rscript", "install_packages.R", stdout = TRUE, stderr = TRUE)
+    } else {
+      cat("Warning: install_packages.R not found, installing packages manually...\n")
+      
+      # Install required packages if not already installed
+      required_packages <- c(
+        "shiny", "shinyjs", "dplyr", "purrr", "ggplot2", "DT", "gridExtra", 
+        "patchwork", "hexbin", "ggiraph", "httr2", "MASS", "digest",
+        "curl", "readr", "lubridate", "stringr", "akima", "colourpicker",
+        "memoise", "shinymanager", "DBI", "RSQLite",
+        "plotly", "jsonlite"
+      )
+      
+      for (pkg in required_packages) {
+        if (!requireNamespace(pkg, quietly = TRUE)) {
+          cat("Installing package:", pkg, "\n")
+          install.packages(pkg, dependencies = TRUE, quiet = TRUE)
+        }
+      }
+    }
+    
+    # Verify critical packages can be loaded
+    cat("Verifying package loading...\n")
+    critical_packages <- c("shiny", "dplyr", "purrr", "DT")
+    for (pkg in critical_packages) {
+      tryCatch({
+        library(pkg, character.only = TRUE)
+        cat("✓ Successfully loaded:", pkg, "\n")
+      }, error = function(e) {
+        cat("✗ Failed to load:", pkg, "- Error:", e$message, "\n")
+        stop(paste("Critical package", pkg, "failed to load"))
+      })
+    }
+    
+    # Deploy the app with better error handling.
+    # shinyapps.io does not support deployApp(envVars=...).
+    cat("Deploying to shinyapps.io...\n")
+    if (!file.exists(".Renviron")) {
+      cat("Warning: .Renviron not found; app may fall back to sqlite state backend in production.\n")
+    }
+
+    # Build an explicit deploy file list so large local CSV archives are never bundled.
+    all_files <- list.files(
+      path = ".",
+      recursive = TRUE,
+      all.files = TRUE,
+      include.dirs = FALSE,
+      no.. = TRUE
+    )
+    keep <- all_files
+    keep <- keep[!grepl("^\\.git/", keep)]
+    keep <- keep[!grepl("^\\.github/", keep)]
+    keep <- keep[!grepl("^docs/", keep)]
+    keep <- keep[!grepl("^packrat/", keep)]
+    keep <- keep[!grepl("^data/practice/", keep)]
+    keep <- keep[!grepl("^data/v3/", keep)]
+    keep <- keep[!grepl("\\.md$", keep, ignore.case = TRUE)]
+    keep <- keep[file.exists(keep)]
+
+    info <- file.info(keep)
+    total_mb <- sum(info$size, na.rm = TRUE) / (1024^2)
+    cat(sprintf("Deploying %d files (%.2f MB uncompressed)\n", length(keep), total_mb))
+
+    deployApp(
+      appDir = ".",
+      appFiles = keep,
+      appName = "lsubaseball",
+      forceUpdate = TRUE,
+      launch.browser = FALSE,
+      logLevel = "verbose"
+    )
+    
+    cat("✓ App deployed successfully!\n")
+    return(TRUE)
+    
+  }, error = function(e) {
+    cat("✗ Deployment failed with error:", e$message, "\n")
+    cat("Full error details:\n")
+    print(e)
+    return(FALSE)
+  })
+}
+
+# Run deployment
+if (!interactive()) {
+  cat("CBU - Deployment Script\n")
+  cat("==========================================\n")
+  success <- deploy_app()
+  if (!success) {
+    cat("Deployment failed. Exiting with error code 1.\n")
+    quit(status = 1)
+  } else {
+    cat("Deployment completed successfully!\n")
+  }
+}
