@@ -841,7 +841,7 @@ ensure_pitch_key_unique_guard <- function(con, school_code = "") {
 
 sync_csv_file_to_neon <- function(con, csv_path, school_code = "") {
   school_code <- toupper(trimws(as.character(school_code)))
-  if (!nzchar(school_code)) school_code <- toupper(trimws(Sys.getenv("TEAM_CODE", "LSU")))
+  if (!nzchar(school_code)) school_code <- toupper(trimws(Sys.getenv("TEAM_CODE", "UNM")))
   force_resync <- pitch_data_parse_bool(Sys.getenv("PITCH_DATA_FORCE_RESYNC", "0"), default = FALSE)
 
   schema <- gsub("[^A-Za-z0-9_]", "_", Sys.getenv("PITCH_DATA_DB_SCHEMA", "public"))
@@ -1203,7 +1203,7 @@ sync_csv_tree_to_neon <- function(data_dir = file.path("data"), school_code = ""
   # Fast pre-skip: one manifest query + local mtime comparison to avoid re-checking
   # unchanged files one-by-one every run.
   school_code_norm <- toupper(trimws(as.character(school_code)))
-  if (!nzchar(school_code_norm)) school_code_norm <- toupper(trimws(Sys.getenv("TEAM_CODE", "LSU")))
+  if (!nzchar(school_code_norm)) school_code_norm <- toupper(trimws(Sys.getenv("TEAM_CODE", "UNM")))
   schema <- gsub("[^A-Za-z0-9_]", "_", Sys.getenv("PITCH_DATA_DB_SCHEMA", "public"))
   mtbl <- DBI::Id(schema = schema, table = "pitch_data_files")
   etbl <- DBI::Id(schema = schema, table = Sys.getenv("PITCH_DATA_DB_TABLE", "pitch_events"))
