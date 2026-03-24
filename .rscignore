@@ -1,2 +1,9 @@
-renv.lock
-packrat/
+^renv\.lock$
+^packrat/
+^\.github/
+^\.git/
+^docs/
+^data/practice/
+^data/v3/
+^data/csv_exclusions\.txt$
+\.md$
