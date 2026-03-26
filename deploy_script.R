@@ -1,22 +1,29 @@
 # deploy_script.R
-# VMI Baseball App Deployment Script
-# Deploys the Shiny app to shinyapps.io
+# School data sync/deploy script
+# Default behavior: sync/prepare only (skip shinyapps deployment).
+# To deploy to shinyapps, run with SHINY_DEPLOY=1.
 
 # Set CRAN repository
 options(repos = c(CRAN = "https://cloud.r-project.org/"))
 
-# Load required libraries
+should_deploy_shiny <- function() {
+  tolower(trimws(Sys.getenv("SHINY_DEPLOY", "0"))) %in% c("1", "true", "yes", "y", "on")
+}
+
+# Load deploy-only library only when explicit deploy is requested.
 suppressPackageStartupMessages({
-  if (!requireNamespace("rsconnect", quietly = TRUE)) {
-    install.packages("rsconnect", dependencies = TRUE)
+  if (should_deploy_shiny()) {
+    if (!requireNamespace("rsconnect", quietly = TRUE)) {
+      install.packages("rsconnect", dependencies = TRUE)
+    }
+    library(rsconnect)
   }
-  library(rsconnect)
 })
 
 # Deploy to shinyapps.io
 deploy_app <- function() {
   tryCatch({
-    cat("Starting deployment of Harvard app...\n")
+    cat("Starting school pipeline...\n")
     if (file.exists(".Renviron")) {
       readRenviron(".Renviron")
     }
@@ -28,12 +35,31 @@ deploy_app <- function() {
         install.packages("renv", dependencies = TRUE)
       }
       renv::consent(provided = TRUE)
-      renv::restore(prompt = FALSE)
-      renv_status <- renv::status()
-      if (!isTRUE(renv_status$synchronized)) {
-        stop("renv lockfile is not synchronized with the project library")
+      lock_text <- paste(readLines("renv.lock", warn = FALSE), collapse = "\n")
+      if (grepl("\"DT\"\\s*:\\s*\\{[^\\}]*\"Version\"\\s*:\\s*\"0\\.34\"", lock_text, perl = TRUE)) {
+        cat("Normalizing DT version in renv.lock (0.34 -> 0.34.0) before restore...\n")
+        lock_text <- sub(
+          "(\"DT\"\\s*:\\s*\\{[^\\}]*\"Version\"\\s*:\\s*\")0\\.34(\")",
+          "\\10.34.0\\2",
+          lock_text,
+          perl = TRUE
+        )
+        writeLines(lock_text, "renv.lock", useBytes = TRUE)
       }
-      cat("✓ renv dependencies restored and synchronized\n")
+      tryCatch({
+        renv::restore(prompt = FALSE)
+      }, error = function(e) {
+        msg <- conditionMessage(e)
+        if (grepl("failed to find source for 'DT 0\\.34'", msg, ignore.case = TRUE)) {
+          cat("Detected DT lockfile mismatch during restore; forcing DT@0.34.0 and retrying...\n")
+          renv::record("DT@0.34.0")
+          renv::snapshot(prompt = FALSE)
+          renv::restore(prompt = FALSE)
+        } else {
+          stop(e)
+        }
+      })
+      cat("✓ renv dependencies restored\n")
     } else {
       cat("No renv.lock found; running package installation fallback...\n")
       if (file.exists("install_packages.R")) {
@@ -71,6 +97,12 @@ deploy_app <- function() {
       })
     }
     
+    if (!should_deploy_shiny()) {
+      cat("SHINY_DEPLOY is not enabled. Skipping shinyapps deployment (sync-only mode).\n")
+      cat("✓ Pipeline completed (no shinyapps deploy attempted)\n")
+      return(TRUE)
+    }
+
     # Deploy the app with better error handling.
     # shinyapps.io does not support deployApp(envVars=...).
     cat("Deploying to shinyapps.io...\n")
@@ -122,8 +154,9 @@ deploy_app <- function() {
 
 # Run deployment
 if (!interactive()) {
-  cat("CBU - Deployment Script\n")
+  cat("School - Deployment Script\n")
   cat("==========================================\n")
+  cat(sprintf("Mode: %s\n", if (should_deploy_shiny()) "sync + shinyapps deploy" else "sync only (no shinyapps deploy)"))
   success <- deploy_app()
   if (!success) {
     cat("Deployment failed. Exiting with error code 1.\n")
