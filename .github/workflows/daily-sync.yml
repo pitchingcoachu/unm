@@ -89,6 +89,11 @@ jobs:
       env:
         R_LIBS_USER: packrat/lib-R
       run: Rscript automated_data_sync.R
+
+    - name: Sync UNM pitch CSVs to Neon
+      env:
+        R_LIBS_USER: packrat/lib-R
+      run: Rscript scripts/sync_pitch_data_to_neon.R data 1
         
     - name: Sync TrackMan media (EdgeR → Cloudinary)
       env:
